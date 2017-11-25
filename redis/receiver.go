@@ -86,6 +86,23 @@ func (rr *Receiver) DeRegister(connection *Connection) {
 	rr.rmConnections <- connection
 }
 
+func loop(i int, conns []*Connection, msg *Message) {
+	if i > len(conns)-1 {
+		return
+	}
+	conn := conns[i]
+	if conn.Channel == msg.Channel {
+		s := string(msg.Data)
+		if err := conn.Websocket.WriteJSON(s); err != nil {
+			fmt.Printf("err writing to socket: %s", err)
+			conns = removeConn(conns, conn)
+			loop(i, conns, msg)
+		}
+	}
+	i = i + 1
+	loop(i, conns, msg)
+}
+
 func (rr *Receiver) connHandler() {
 	conns := make([]*Connection, 0)
 	for {
@@ -94,18 +111,21 @@ func (rr *Receiver) connHandler() {
 			fmt.Printf("got msg: %s\n", msg)
 			fmt.Printf("no of connect: %d", len(conns))
 
-			for _, conn := range conns {
-				if conn.Channel == msg.Channel {
-					// send to all connected clients
-					s := string(msg.Data)
+			loop(0, conns, msg)
 
-					if err := conn.Websocket.WriteJSON(s); err != nil {
-						fmt.Printf("err writing to socket: %s", err)
-						conns = removeConn(conns, conn)
-					}
-					fmt.Println("wrote to socket")
-				}
-			}
+			// for _, conn := range conns {
+			// 	if conn.Channel == msg.Channel {
+			// 		// send to all connected clients
+			// 		s := string(msg.Data)
+
+			// 		if err := conn.Websocket.WriteJSON(s); err != nil {
+			// 			fmt.Printf("err writing to socket: %s", err)
+			// 			conns = removeConn(conns, conn)
+			// 			continue
+			// 		}
+			// 		fmt.Println("wrote to socket")
+			// 	}
+			// }
 		case conn := <-rr.newConnections:
 			conns = append(conns, conn)
 		case conn := <-rr.rmConnections:

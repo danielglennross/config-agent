@@ -43,12 +43,12 @@ func main() {
 	// 	}
 	// }()
 
-	r := makeRouter(rr, rw)
+	r := makeRouter(h, rr, rw)
 	http.Handle("/", r)
 	http.ListenAndServe(":8080", nil)
 }
 
-func makeRouter(rr *redis.Receiver, rw *redis.Writer) *mux.Router {
+func makeRouter(h *hub.Hub, rr *redis.Receiver, rw *redis.Writer) *mux.Router {
 	r := mux.NewRouter()
 	r.HandleFunc("/config/{bag}", api.HandleWebsocket(h, rr)).Methods("GET")
 	r.HandleFunc("/config/{bag}", api.UpdateBagHandler(h, rw)).Methods("PUT")
