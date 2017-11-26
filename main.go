@@ -30,19 +30,6 @@ func main() {
 		}
 	}()
 
-	// go func() {
-	// 	for {
-	// 		waited, err := redis.WaitForAvailability("redisURL", 10*time.Second, nil)
-	// 		if !waited || err != nil {
-	// 			break
-	// 		}
-	// 		err = rw.Run()
-	// 		if err == nil {
-	// 			break
-	// 		}
-	// 	}
-	// }()
-
 	r := makeRouter(h, rr, rw)
 	http.Handle("/", r)
 	http.ListenAndServe(":8080", nil)

@@ -2,6 +2,7 @@ package redis
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/garyburd/redigo/redis"
@@ -14,6 +15,7 @@ var establishedChannels []string
 // Receiver receives messages from Redis and broadcasts them to all
 // registered websocket connections that are Registered.
 type Receiver struct {
+	mu   *sync.Mutex
 	pool *redis.Pool
 
 	messages       chan *Message
@@ -25,6 +27,7 @@ type Receiver struct {
 // rredis.Pool.
 func NewReceiver(pool *redis.Pool) *Receiver {
 	return &Receiver{
+		mu:             &sync.Mutex{},
 		pool:           pool,
 		messages:       make(chan *Message, 1000), // 1000 is arbitrary
 		newConnections: make(chan *Connection),
@@ -41,6 +44,8 @@ func (rr *Receiver) Wait(_ time.Time) error {
 // Run receives pubsub messages from Redis after establishing a connection.
 // When a valid message is received it is broadcast to all connected websockets
 func (rr *Receiver) Run(channel string) error {
+	rr.mu.Lock()
+
 	for _, existing := range establishedChannels {
 		if existing == channel {
 			return nil
@@ -53,6 +58,9 @@ func (rr *Receiver) Run(channel string) error {
 	defer conn.Close()
 	psc := redis.PubSubConn{Conn: conn}
 	psc.Subscribe(channel)
+
+	rr.mu.Unlock()
+
 	go rr.connHandler()
 	for {
 		v := psc.Receive()
@@ -86,21 +94,23 @@ func (rr *Receiver) DeRegister(connection *Connection) {
 	rr.rmConnections <- connection
 }
 
-func loop(i int, conns []*Connection, msg *Message) {
-	if i > len(conns)-1 {
+func sendToWebConns(i int, conns *[]*Connection, msg *Message) {
+	if i > len(*conns)-1 {
 		return
 	}
-	conn := conns[i]
+	conn := (*conns)[i]
 	if conn.Channel == msg.Channel {
 		s := string(msg.Data)
 		if err := conn.Websocket.WriteJSON(s); err != nil {
 			fmt.Printf("err writing to socket: %s", err)
-			conns = removeConn(conns, conn)
-			loop(i, conns, msg)
+			*conns = removeConn(*conns, conn)
+			sendToWebConns(i, conns, msg)
+			fmt.Printf("%d", len(*conns))
+			return
 		}
 	}
-	i = i + 1
-	loop(i, conns, msg)
+	i++
+	sendToWebConns(i, conns, msg)
 }
 
 func (rr *Receiver) connHandler() {
@@ -111,21 +121,40 @@ func (rr *Receiver) connHandler() {
 			fmt.Printf("got msg: %s\n", msg)
 			fmt.Printf("no of connect: %d", len(conns))
 
-			loop(0, conns, msg)
+			//fmt.Printf("conn[0] %v\n", conns[0])
 
-			// for _, conn := range conns {
-			// 	if conn.Channel == msg.Channel {
-			// 		// send to all connected clients
-			// 		s := string(msg.Data)
+			sendToWebConns(0, &conns, msg)
+			fmt.Printf("%d", len(conns))
 
-			// 		if err := conn.Websocket.WriteJSON(s); err != nil {
-			// 			fmt.Printf("err writing to socket: %s", err)
-			// 			conns = removeConn(conns, conn)
-			// 			continue
-			// 		}
-			// 		fmt.Println("wrote to socket")
-			// 	}
-			// }
+			go func() {
+				rr.mu.Lock()
+				found := false
+				fmt.Printf("%d", len(conns))
+				for _, conn := range conns {
+					if conn.Channel == msg.Channel {
+						found = true
+					}
+				}
+				if !found {
+					var i int
+					var exists = false
+					for i = 0; i < len(establishedChannels); i++ {
+						if establishedChannels[i] == msg.Channel {
+							exists = true
+							break
+						}
+					}
+					if exists {
+						establishedChannels = append(establishedChannels[:i], establishedChannels[i+1:]...)
+						conn := rr.pool.Get()
+						defer conn.Close()
+						psc := redis.PubSubConn{Conn: conn}
+						psc.Unsubscribe(msg.Channel)
+					}
+				}
+				rr.mu.Unlock()
+			}()
+
 		case conn := <-rr.newConnections:
 			conns = append(conns, conn)
 		case conn := <-rr.rmConnections:
