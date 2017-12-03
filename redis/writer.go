@@ -1,20 +1,26 @@
 package redis
 
 import (
+	"fmt"
+
+	"github.com/danielglennross/config-agent/err"
 	"github.com/garyburd/redigo/redis"
 	"github.com/pkg/errors"
 )
 
 // Writer publishes messages to the Redis CHANNEL
 type Writer struct {
-	pool     *redis.Pool
+	pool  *redis.Pool
+	close *err.Close
+
 	messages chan *Message
 }
 
 // NewWriter ctor
-func NewWriter(pool *redis.Pool) *Writer {
+func NewWriter(pool *redis.Pool, close *err.Close) *Writer {
 	return &Writer{
 		pool:     pool,
+		close:    close,
 		messages: make(chan *Message, 10000),
 	}
 }
@@ -24,8 +30,17 @@ func (rw *Writer) Run() error {
 	conn := rw.pool.Get()
 	defer conn.Close()
 
+	rw.close.Wg.Add(1)
+	defer rw.close.Wg.Done()
+
+	exit := make(chan bool)
+	*rw.close.Exit = append(*rw.close.Exit, exit)
+
 	for {
 		select {
+		case <-exit:
+			fmt.Println("exiting writer run")
+			return nil
 		case msg := <-rw.messages:
 			if err := writeToRedis(conn, msg); err != nil {
 				rw.Publish(msg) // attempt to redeliver later

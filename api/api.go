@@ -37,6 +37,12 @@ func setErrResponse(w http.ResponseWriter, err *errResponse) {
 // UpdateBagHandler handler to update bags
 func UpdateBagHandler(h *hub.Hub, rw *redis.Writer) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		correlationToken := r.Header.Get("X-Correlation-Token")
+		if correlationToken == "" {
+			setErrResponse(w, &errResponse{code: "missing-correlation-token", detail: "correlation token cannot be empty."})
+			return
+		}
+
 		vars := mux.Vars(r)
 		bag := vars["bag"]
 
@@ -66,9 +72,14 @@ func UpdateBagHandler(h *hub.Hub, rw *redis.Writer) func(w http.ResponseWriter, 
 // HandleWebsocket applies web scoket connection
 func HandleWebsocket(h *hub.Hub, rr *redis.Receiver) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		correlationToken := r.Header.Get("X-Correlation-Token")
+		if correlationToken == "" {
+			setErrResponse(w, &errResponse{code: "missing-correlation-token", detail: "correlation token cannot be empty."})
+			return
+		}
+
 		vars := mux.Vars(r)
 		bag := vars["bag"]
-
 		if bag == "" {
 			setErrResponse(w, &errResponse{code: "missing-bag", detail: "bag cannot be empty."})
 			return

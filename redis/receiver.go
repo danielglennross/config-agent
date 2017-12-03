@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/danielglennross/config-agent/err"
 	"github.com/garyburd/redigo/redis"
 	"github.com/pkg/errors"
 )
@@ -15,8 +16,9 @@ var establishedChannels []string
 // Receiver receives messages from Redis and broadcasts them to all
 // registered websocket connections that are Registered.
 type Receiver struct {
-	mu   *sync.Mutex
-	pool *redis.Pool
+	mu    *sync.Mutex
+	pool  *redis.Pool
+	close *err.Close
 
 	messages       chan *Message
 	newConnections chan *Connection
@@ -25,10 +27,11 @@ type Receiver struct {
 
 // NewReceiver creates a redisReceiver that will use the provided
 // rredis.Pool.
-func NewReceiver(pool *redis.Pool) *Receiver {
+func NewReceiver(pool *redis.Pool, close *err.Close) *Receiver {
 	return &Receiver{
 		mu:             &sync.Mutex{},
 		pool:           pool,
+		close:          close,
 		messages:       make(chan *Message, 1000), // 1000 is arbitrary
 		newConnections: make(chan *Connection),
 		rmConnections:  make(chan *Connection),
@@ -61,18 +64,36 @@ func (rr *Receiver) Run(channel string) error {
 
 	rr.mu.Unlock()
 
-	go rr.connHandler()
+	rr.close.Wg.Add(1)
+	go connHandler(rr)
+
+	rr.close.Wg.Add(1)
+	defer rr.close.Wg.Done()
+
+	exit := make(chan bool)
+	*rr.close.Exit = append(*rr.close.Exit, exit)
+
 	for {
-		v := psc.Receive()
-		fmt.Printf("got msg type: %s - %v", v, v)
-		switch v.(type) {
-		case redis.Message:
-			rr.Broadcast(&Message{Channel: channel, Data: v.(redis.Message).Data})
-		case redis.Subscription:
-			continue
-		case error:
-			return errors.Wrap(v.(error), "Error while subscribed to Redis channel")
-		default:
+		fmt.Println("waiting for msg...")
+		receiver := make(chan interface{})
+		go func() {
+			receiver <- psc.Receive()
+		}()
+		select {
+		case <-exit:
+			fmt.Println("exiting receiver run")
+			return nil
+		case v := <-receiver:
+			fmt.Printf("got msg type: %s - %v", v, v)
+			switch v.(type) {
+			case redis.Message:
+				rr.Broadcast(&Message{Channel: channel, Data: v.(redis.Message).Data})
+			case redis.Subscription:
+				continue
+			case error:
+				return errors.Wrap(v.(error), "Error while subscribed to Redis channel")
+			default:
+			}
 		}
 	}
 }
@@ -113,10 +134,18 @@ func sendToWebConns(i int, conns *[]*Connection, msg *Message) {
 	sendToWebConns(i, conns, msg)
 }
 
-func (rr *Receiver) connHandler() {
+func connHandler(rr *Receiver) {
+	defer rr.close.Wg.Done()
+
+	exit := make(chan bool)
+	*rr.close.Exit = append(*rr.close.Exit, exit)
+
 	conns := make([]*Connection, 0)
 	for {
 		select {
+		case <-exit:
+			fmt.Println("exiting conn handler")
+			return
 		case msg := <-rr.messages:
 			fmt.Printf("got msg: %s\n", msg)
 			fmt.Printf("no of connect: %d", len(conns))
