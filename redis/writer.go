@@ -26,7 +26,7 @@ func NewWriter(pool *redis.Pool, close *err.Close) *Writer {
 }
 
 // Run the main redisWriter loop that publishes incoming messages to Redis.
-func (rw *Writer) Run() error {
+func (rw *Writer) Run() {
 	conn := rw.pool.Get()
 	defer conn.Close()
 
@@ -40,7 +40,7 @@ func (rw *Writer) Run() error {
 		select {
 		case <-exit:
 			fmt.Println("exiting writer run")
-			return nil
+			return
 		case msg := <-rw.messages:
 			if err := writeToRedis(conn, msg); err != nil {
 				rw.Publish(msg) // attempt to redeliver later

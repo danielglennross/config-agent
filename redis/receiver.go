@@ -16,9 +16,10 @@ var establishedChannels []string
 // Receiver receives messages from Redis and broadcasts them to all
 // registered websocket connections that are Registered.
 type Receiver struct {
-	mu    *sync.Mutex
-	pool  *redis.Pool
-	close *err.Close
+	mu         *sync.Mutex
+	pool       *redis.Pool
+	pubSubConn *redis.PubSubConn
+	close      *err.Close
 
 	messages       chan *Message
 	newConnections chan *Connection
@@ -31,11 +32,23 @@ func NewReceiver(pool *redis.Pool, close *err.Close) *Receiver {
 	return &Receiver{
 		mu:             &sync.Mutex{},
 		pool:           pool,
+		pubSubConn:     nil,
 		close:          close,
 		messages:       make(chan *Message, 1000), // 1000 is arbitrary
 		newConnections: make(chan *Connection),
 		rmConnections:  make(chan *Connection),
 	}
+}
+
+// Init init pubsub
+func (rr *Receiver) Init() {
+	conn := rr.pool.Get()
+	rr.pubSubConn = &redis.PubSubConn{Conn: conn}
+}
+
+//Destroy pubsub
+func (rr *Receiver) Destroy() {
+	rr.pubSubConn.Close()
 }
 
 // Wait wait
@@ -57,10 +70,7 @@ func (rr *Receiver) Run(channel string) error {
 
 	establishedChannels = append(establishedChannels, channel)
 
-	conn := rr.pool.Get()
-	defer conn.Close()
-	psc := redis.PubSubConn{Conn: conn}
-	psc.Subscribe(channel)
+	rr.pubSubConn.Subscribe(channel)
 
 	rr.mu.Unlock()
 
@@ -77,11 +87,13 @@ func (rr *Receiver) Run(channel string) error {
 		fmt.Println("waiting for msg...")
 		receiver := make(chan interface{})
 		go func() {
-			receiver <- psc.Receive()
+			//receiver <- psc.Receive()
+			receiver <- rr.pubSubConn.Receive()
 		}()
 		select {
 		case <-exit:
 			fmt.Println("exiting receiver run")
+			rr.Destroy()
 			return nil
 		case v := <-receiver:
 			fmt.Printf("got msg type: %s - %v", v, v)
@@ -175,10 +187,8 @@ func connHandler(rr *Receiver) {
 					}
 					if exists {
 						establishedChannels = append(establishedChannels[:i], establishedChannels[i+1:]...)
-						conn := rr.pool.Get()
-						defer conn.Close()
-						psc := redis.PubSubConn{Conn: conn}
-						psc.Unsubscribe(msg.Channel)
+						fmt.Printf("unsubscribing channel: %s", msg.Channel)
+						rr.pubSubConn.Unsubscribe(msg.Channel)
 					}
 				}
 				rr.mu.Unlock()

@@ -9,12 +9,11 @@ import (
 	"syscall"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/gorilla/mux"
 
-	"github.com/danielglennross/config-agent/api"
 	"github.com/danielglennross/config-agent/err"
 	"github.com/danielglennross/config-agent/hub"
 	"github.com/danielglennross/config-agent/redis"
+	"github.com/danielglennross/config-agent/routing"
 )
 
 var (
@@ -37,13 +36,8 @@ func main() {
 	rr := redis.NewReceiver(redisPool, close)
 	rw := redis.NewWriter(redisPool, close)
 
-	go func() {
-		err = rw.Run()
-		if err != nil {
-			log.WithError(err).Fatal("Failed to run redis writer")
-			os.Exit(1)
-		}
-	}()
+	rr.Init()
+	go rw.Run()
 
 	srv := &http.Server{Addr: ":8080"}
 
@@ -54,21 +48,16 @@ func main() {
 		}
 	}()
 
-	r := makeRouter(h, rr, rw)
+	r := routing.NewRouter(h, rr, rw)
 	http.Handle("/", r)
 
 	close.Wg.Add(1)
 	go handleSignal(close)
 
 	close.Wg.Wait()
-	srv.Shutdown(nil)
-}
 
-func makeRouter(h *hub.Hub, rr *redis.Receiver, rw *redis.Writer) *mux.Router {
-	r := mux.NewRouter()
-	r.HandleFunc("/config/{bag}", api.HandleWebsocket(h, rr)).Methods("GET")
-	r.HandleFunc("/config/{bag}", api.UpdateBagHandler(h, rw)).Methods("PUT")
-	return r
+	//rr.Destroy()
+	srv.Shutdown(nil)
 }
 
 func handleSignal(close *err.Close) {

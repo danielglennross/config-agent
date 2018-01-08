@@ -37,5 +37,22 @@ func (hub *Hub) GetBag(bag string) ([]byte, error) {
 		return nil, err
 	}
 
+	if val == nil {
+		return nil, nil
+	}
+
 	return val.([]byte), nil
+}
+
+// DelBag gets the bag
+func (hub *Hub) DelBag(bag string) error {
+	conn := hub.pool.Get()
+	defer conn.Close()
+
+	_, err := conn.Do("DEL", bag)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
