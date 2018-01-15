@@ -13,11 +13,20 @@ import (
 )
 
 // CreateRedisPool create a redis pool
-func CreateRedisPool() (*redigo.Pool, error) {
+func CreateRedisPool(setupPool func(c redigo.Conn) error) (*redigo.Pool, error) {
 	redisPool, err := redis.NewRedisPoolFromURL("redis://localhost:6379")
 	if err != nil {
 		return nil, err
 	}
+
+	c := redisPool.Get()
+	defer c.Close()
+
+	err = setupPool(c)
+	if err != nil {
+		return nil, err
+	}
+
 	return redisPool, nil
 }
 

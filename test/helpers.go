@@ -3,7 +3,6 @@ package test
 import (
 	"bytes"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -38,8 +37,7 @@ func (server *Server) PopulateBag(bag string, config *Config) (*http.Response, e
 func (server *Server) CreateWebSocket(bag string) (*websocket.Conn, error) {
 	ws := strings.Replace(server.URL, "http://", "", -1)
 
-	addr := flag.String("addr", ws, "http service address")
-	u := url.URL{Scheme: "ws", Host: *addr, Path: "/config/" + bag}
+	u := url.URL{Scheme: "ws", Host: ws, Path: "/config/" + bag}
 
 	header := http.Header{"X-Correlation-Token": []string{"token"}}
 
@@ -53,9 +51,9 @@ func (server *Server) CreateWebSocket(bag string) (*websocket.Conn, error) {
 }
 
 // VerifyChannelRemoved verifies a channel is removed
-func (server *Server) VerifyChannelRemoved(redisPool *redigo.Pool, bag string) (bool, error) {
-	_, err := server.PopulateBag(bag, &Config{})
-	_, err = server.PopulateBag(bag, &Config{})
+func (server *Server) VerifyChannelRemoved(redisPool *redigo.Pool, bag string, config *Config) (bool, error) {
+	_, err := server.PopulateBag(bag, config)
+	_, err = server.PopulateBag(bag, config)
 	if err != nil {
 		return false, err
 	}

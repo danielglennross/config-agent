@@ -28,7 +28,7 @@ func main() {
 
 	redisPool, err := redis.NewRedisPoolFromURL("redis://localhost:6379")
 	if err != nil {
-		fmt.Printf("error: %s", err)
+		fmt.Printf("\nerror: %s", err)
 		return
 	}
 
@@ -72,9 +72,9 @@ func handleSignal(close *err.Close) {
 	)
 
 	sig := <-c
-	fmt.Printf("received %s signal, stopping profiles gracefully\n", sig)
+	fmt.Printf("\nreceived %s signal, stopping profiles gracefully\n", sig)
 
-	fmt.Printf("no: exit channels %d\n", len(*close.Exit))
+	fmt.Printf("\nno: exit channels %d\n", len(*close.Exit))
 	for _, exit := range *close.Exit {
 		exit <- true
 	}

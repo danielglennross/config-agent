@@ -47,7 +47,7 @@ func UpdateBagHandler(h *hub.Hub, rw *redis.Writer) func(w http.ResponseWriter, 
 		vars := mux.Vars(r)
 		bag := vars["bag"]
 
-		fmt.Printf("I got here %s", bag)
+		fmt.Printf("\nI got here %s", bag)
 
 		if bag == "" {
 			setErrResponse(w, &errResponse{Code: "missing-bag", Detail: "bag cannot be empty."})
@@ -60,7 +60,7 @@ func UpdateBagHandler(h *hub.Hub, rw *redis.Writer) func(w http.ResponseWriter, 
 			return
 		}
 
-		// update in memory
+		// update in redis
 		_ = h.SetBag(bag, body)
 
 		// publish to redis
@@ -87,8 +87,8 @@ func HandleWebsocket(h *hub.Hub, rr *redis.Receiver) func(w http.ResponseWriter,
 		}
 
 		ws, err := upgrader.Upgrade(w, r, nil)
-		fmt.Printf("fail websocket: %s", err)
 		if err != nil {
+			fmt.Printf("\nfail websocket: %s", err)
 			setErrResponse(w, &errResponse{Code: "websocket-upgrade", Detail: "unable to upgrade to websockets."})
 			return
 		}
@@ -106,9 +106,9 @@ func HandleWebsocket(h *hub.Hub, rr *redis.Receiver) func(w http.ResponseWriter,
 		//return the in memory collection
 		data, _ := h.GetBag(bag)
 
-		json := string(data)
+		fmt.Printf("\n hub bag: %s", data)
 
-		ws.WriteJSON(json)
+		ws.WriteMessage(websocket.TextMessage, data)
 
 		//for {
 		//	mt, data, err := ws.ReadMessage()

@@ -5,21 +5,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/danielglennross/config-agent/err"
 	"github.com/garyburd/redigo/redis"
 	"github.com/pkg/errors"
 )
 
-// todo - figure out when to remove a channel from here (when all disconnected?)
-var establishedChannels []string
+// todo - figure out when to remove a channel from here (when all disconnected?) - DONE
+// todo - THIS IS SINGLETON for all test servers, make per-server
+
+// var establishedChannels []string
 
 // Receiver receives messages from Redis and broadcasts them to all
 // registered websocket connections that are Registered.
 type Receiver struct {
-	mu         *sync.Mutex
-	pool       *redis.Pool
-	pubSubConn *redis.PubSubConn
-	close      *err.Close
+	mu                  *sync.Mutex
+	pool                *redis.Pool
+	pubSubConn          *redis.PubSubConn
+	close               *err.Close
+	establishedChannels []string
 
 	messages       chan *Message
 	newConnections chan *Connection
@@ -62,13 +67,13 @@ func (rr *Receiver) Wait(_ time.Time) error {
 func (rr *Receiver) Run(channel string) error {
 	rr.mu.Lock()
 
-	for _, existing := range establishedChannels {
+	for _, existing := range rr.establishedChannels {
 		if existing == channel {
 			return nil
 		}
 	}
 
-	establishedChannels = append(establishedChannels, channel)
+	rr.establishedChannels = append(rr.establishedChannels, channel)
 
 	rr.pubSubConn.Subscribe(channel)
 
@@ -96,7 +101,7 @@ func (rr *Receiver) Run(channel string) error {
 			rr.Destroy()
 			return nil
 		case v := <-receiver:
-			fmt.Printf("got msg type: %s - %v", v, v)
+			fmt.Printf("\ngot msg type: %s - %v", v, v)
 			switch v.(type) {
 			case redis.Message:
 				rr.Broadcast(&Message{Channel: channel, Data: v.(redis.Message).Data})
@@ -133,12 +138,11 @@ func sendToWebConns(i int, conns *[]*Connection, msg *Message) {
 	}
 	conn := (*conns)[i]
 	if conn.Channel == msg.Channel {
-		s := string(msg.Data)
-		if err := conn.Websocket.WriteJSON(s); err != nil {
-			fmt.Printf("err writing to socket: %s", err)
+		if err := conn.Websocket.WriteMessage(websocket.TextMessage, msg.Data); err != nil {
+			fmt.Printf("\nerr writing to socket: %s", err)
 			*conns = removeConn(*conns, conn)
 			sendToWebConns(i, conns, msg)
-			fmt.Printf("%d", len(*conns))
+			fmt.Printf("\n no. conns: %d", len(*conns))
 			return
 		}
 	}
@@ -159,18 +163,18 @@ func connHandler(rr *Receiver) {
 			fmt.Println("exiting conn handler")
 			return
 		case msg := <-rr.messages:
-			fmt.Printf("got msg: %s\n", msg)
-			fmt.Printf("no of connect: %d", len(conns))
+			fmt.Printf("\ngot msg: %s", msg)
+			fmt.Printf("\nno of conns before: %d", len(conns))
 
 			//fmt.Printf("conn[0] %v\n", conns[0])
 
 			sendToWebConns(0, &conns, msg)
-			fmt.Printf("%d", len(conns))
+			fmt.Printf("\nno conns after: %d", len(conns))
 
+			// TODO delay this?
 			go func() {
 				rr.mu.Lock()
 				found := false
-				fmt.Printf("%d", len(conns))
 				for _, conn := range conns {
 					if conn.Channel == msg.Channel {
 						found = true
@@ -179,15 +183,15 @@ func connHandler(rr *Receiver) {
 				if !found {
 					var i int
 					var exists = false
-					for i = 0; i < len(establishedChannels); i++ {
-						if establishedChannels[i] == msg.Channel {
+					for i = 0; i < len(rr.establishedChannels); i++ {
+						if rr.establishedChannels[i] == msg.Channel {
 							exists = true
 							break
 						}
 					}
 					if exists {
-						establishedChannels = append(establishedChannels[:i], establishedChannels[i+1:]...)
-						fmt.Printf("unsubscribing channel: %s", msg.Channel)
+						rr.establishedChannels = append(rr.establishedChannels[:i], rr.establishedChannels[i+1:]...)
+						fmt.Printf("\nunsubscribing channel: %s", msg.Channel)
 						rr.pubSubConn.Unsubscribe(msg.Channel)
 					}
 				}
@@ -212,7 +216,7 @@ func removeConn(conns []*Connection, remove *Connection) []*Connection {
 		}
 	}
 	if !found {
-		fmt.Printf("conns: %#v\nconn: %#v\n", conns, remove)
+		fmt.Printf("\nconns: %#v\nconn: %#v", conns, remove)
 		panic("Conn not found")
 	}
 	copy(conns[i:], conns[i+1:]) // shift down
