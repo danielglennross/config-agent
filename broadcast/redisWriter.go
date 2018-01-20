@@ -2,6 +2,7 @@ package broadcast
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/danielglennross/config-agent/err"
 	"github.com/garyburd/redigo/redis"
@@ -34,8 +35,9 @@ func (rw *RedisWriter) Init() {
 	rw.conn = rw.connFactory()
 }
 
-func (rw *RedisWriter) destroyRedis() {
-	rw.conn.Close()
+// Publish to Redis via channel.
+func (rw *RedisWriter) Publish(message *Message) {
+	rw.messages <- message
 }
 
 // Run the main redisWriter loop that publishes incoming messages to Redis.
@@ -46,31 +48,39 @@ func (rw *RedisWriter) Run() {
 	exit := make(chan bool)
 	*rw.close.Exit = append(*rw.close.Exit, exit)
 
+	writeToRedis := func(msg *Message) error {
+		if err := rw.conn.Send("PUBLISH", msg.Channel, msg.Data); err != nil {
+			return errors.Wrap(err, "Unable to publish message to Redis")
+		}
+
+		if err := rw.conn.Flush(); err != nil {
+			return errors.Wrap(err, "Unable to flush published message to Redis")
+		}
+
+		return nil
+	}
+
+	reDeliver := func(msg *Message) {
+		time.Sleep(time.Millisecond * 300)
+		msg.DeliveryAttempt++
+		rw.Publish(msg)
+	}
+
+	dispose := func() {
+		rw.conn.Close()
+	}
+
 	for {
 		select {
 		case <-exit:
-			fmt.Println("exiting writer run")
-			rw.destroyRedis()
+			fmt.Println("disposing writer")
+			dispose()
+			fmt.Println("disposed writer")
 			return
 		case msg := <-rw.messages:
-			if err := writeToRedis(rw.conn, msg); err != nil {
-				rw.Publish(msg) // attempt to redeliver later
+			if err := writeToRedis(msg); err != nil && msg.DeliveryAttempt < 3 {
+				go reDeliver(msg)
 			}
 		}
 	}
-}
-
-// Publish to Redis via channel.
-func (rw *RedisWriter) Publish(message *Message) {
-	rw.messages <- message
-}
-
-func writeToRedis(conn redis.Conn, message *Message) error {
-	if err := conn.Send("PUBLISH", message.Channel, message.Data); err != nil {
-		return errors.Wrap(err, "Unable to publish message to Redis")
-	}
-	if err := conn.Flush(); err != nil {
-		return errors.Wrap(err, "Unable to flush published message to Redis")
-	}
-	return nil
 }

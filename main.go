@@ -17,6 +17,12 @@ import (
 	"github.com/danielglennross/config-agent/store"
 )
 
+/*
+curl --include --no-buffer --header "Connection: Upgrade" --header "Upgrade: websocket" --header "Host: localhost:8080" --header "Origin: http://localhost:8080" --header "Sec-WebSocket-Key: SGVsbG8sIHdvcmxkIQ==" --header "Sec-WebSocket-Version: 13" --header "X-Correlation-Token: test" http://localhost:8080/config/testbag
+
+curl -X PUT -d "{\"key1\":\"value\"}" -H "X-Correlation-Token: test" http://localhost:8080/config/testbag
+*/
+
 var (
 	log = logrus.WithField("app", "config-agent")
 )
@@ -58,7 +64,9 @@ func main() {
 	go handleSignal(close)
 
 	close.Wg.Wait()
+	fmt.Println("clossssed")
 
+	redisPool.Close()
 	srv.Shutdown(nil)
 }
 
@@ -76,7 +84,6 @@ func handleSignal(close *err.Close) {
 	sig := <-c
 	fmt.Printf("\nreceived %s signal, stopping profiles gracefully\n", sig)
 
-	fmt.Printf("\nno: exit channels %d\n", len(*close.Exit))
 	for _, exit := range *close.Exit {
 		exit <- true
 	}

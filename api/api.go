@@ -49,8 +49,6 @@ func UpdateBagHandler(store store.BagStore, writer broadcast.Writer) func(w http
 		vars := mux.Vars(r)
 		bag := vars["bag"]
 
-		fmt.Printf("\nI got here %s", bag)
-
 		if bag == "" {
 			badRequest(w, &errResponse{Code: "missing-bag", Detail: "bag cannot be empty."})
 			return
@@ -70,7 +68,7 @@ func UpdateBagHandler(store store.BagStore, writer broadcast.Writer) func(w http
 		}
 
 		// publish to redis
-		writer.Publish(&broadcast.Message{Channel: bag, Data: body})
+		writer.Publish(&broadcast.Message{Channel: bag, Data: body, DeliveryAttempt: 0})
 
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -99,13 +97,7 @@ func HandleWebsocket(store store.BagStore, br broadcast.Receiver) func(w http.Re
 			return
 		}
 
-		go func() {
-			err = br.Run(bag)
-			if err != nil {
-				serverError(w, &errResponse{Code: "init-fail", Detail: "failed to initialize channel."})
-				return
-			}
-		}()
+		go br.Run(bag)
 
 		br.Register(&broadcast.Connection{Websocket: ws, Channel: bag})
 
@@ -115,8 +107,6 @@ func HandleWebsocket(store store.BagStore, br broadcast.Receiver) func(w http.Re
 			serverError(w, &errResponse{Code: "get-bag-fail", Detail: "failed to get bag."})
 			return
 		}
-
-		fmt.Printf("\n hub bag: %s", data)
 
 		ws.WriteMessage(websocket.TextMessage, data)
 	}

@@ -57,6 +57,10 @@ func CreateServer(redisPool *redigo.Pool, setupStore func(store store.BagStore) 
 
 	var tearDowns []func()
 	tearDowns = append(tearDowns, func() {
+		redisPool.Close()
+	})
+
+	tearDowns = append(tearDowns, func() {
 		for _, exit := range *close.Exit {
 			exit <- true
 		}

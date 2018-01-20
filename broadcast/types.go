@@ -4,8 +4,9 @@ import "github.com/gorilla/websocket"
 
 // Message channel -> data
 type Message struct {
-	Channel string
-	Data    []byte
+	Channel         string
+	Data            []byte
+	DeliveryAttempt int
 }
 
 // Connection channel -> web socket connection
@@ -17,7 +18,7 @@ type Connection struct {
 // Receiver receiver
 type Receiver interface {
 	Init()
-	Run(channel string) error
+	Run(channel string)
 	Broadcast(msg *Message)
 	Register(connection *Connection)
 }

@@ -3,11 +3,11 @@ package broadcast
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/danielglennross/config-agent/err"
 	"github.com/garyburd/redigo/redis"
 	"github.com/gorilla/websocket"
-	"github.com/pkg/errors"
 )
 
 type mutateConnection func(conns []*Connection, add *Connection) []*Connection
@@ -46,93 +46,36 @@ func (rr *RedisReceiver) Init() {
 	rr.pubSubConn = rr.pubSubConnFactory()
 }
 
-func (rr *RedisReceiver) destroyWebsockets(conns []*Connection) {
-	err := make(chan error)
-
-	for _, c := range conns {
-		go func(c *Connection) {
-			err <- c.Websocket.Close()
-		}(c)
-	}
-
-	for e := range err {
-		fmt.Println(e)
-	}
-}
-
-func (rr *RedisReceiver) destroyRedis(channel string) {
-	// close connection
-	rr.pubSubConn.Close()
-
-	// remove channel from in memory list
+func (rr *RedisReceiver) registerChannel(channel string) bool {
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
 
-	var i int
-	var found bool
-	for i = 0; i < len(rr.establishedChannels); i++ {
-		if rr.establishedChannels[i] == channel {
-			found = true
-			break
-		}
-	}
-	if found {
-		copy(rr.establishedChannels[i:], rr.establishedChannels[i+1:])                  // shift down
-		rr.establishedChannels[len(rr.establishedChannels)-1] = ""                      // nil last element
-		rr.establishedChannels = rr.establishedChannels[:len(rr.establishedChannels)-1] // truncate slice
-	}
-}
-
-// Run receives pubsub messages from Redis after establishing a connection.
-// When a valid message is received it is broadcast to all connected websockets
-func (rr *RedisReceiver) Run(channel string) error {
-	rr.mu.Lock()
-
 	for _, existing := range rr.establishedChannels {
 		if existing == channel {
-			return nil
+			return false
 		}
 	}
 
 	rr.establishedChannels = append(rr.establishedChannels, channel)
-
 	rr.pubSubConn.Subscribe(channel)
 
-	rr.mu.Unlock()
+	return true
+}
 
-	rr.close.Wg.Add(1)
-	go connHandler(rr)
-
-	rr.close.Wg.Add(1)
-	defer rr.close.Wg.Done()
-
-	exit := make(chan bool)
-	*rr.close.Exit = append(*rr.close.Exit, exit)
-
-	for {
-		fmt.Println("waiting for msg...")
-		receiver := make(chan interface{})
-		go func() {
-			receiver <- rr.pubSubConn.Receive()
-		}()
-		select {
-		case <-exit:
-			fmt.Println("exiting receiver run")
-			rr.destroyRedis(channel)
-			return nil
-		case v := <-receiver:
-			fmt.Printf("\ngot msg type: %s - %v", v, v)
-			switch v.(type) {
-			case redis.Message:
-				rr.Broadcast(&Message{Channel: channel, Data: v.(redis.Message).Data})
-			case redis.Subscription:
-				continue
-			case error:
-				return errors.Wrap(v.(error), "Error while subscribed to Redis channel")
-			default:
-			}
-		}
+// Run receives pubsub messages from Redis after establishing a connection.
+// When a valid message is received it is broadcast to all connected websockets
+func (rr *RedisReceiver) Run(channel string) {
+	if ok := rr.registerChannel(channel); !ok {
+		return
 	}
+
+	rr.close.Wg.Add(1)
+	go rr.broadcaster()
+
+	rr.close.Wg.Add(1)
+	go rr.listener(channel)
+
+	return
 }
 
 // Broadcast the provided message to all connected websocket connections.
@@ -142,35 +85,78 @@ func (rr *RedisReceiver) Broadcast(msg *Message) {
 	rr.messages <- msg
 }
 
+func (rr *RedisReceiver) listener(channel string) {
+	defer rr.close.Wg.Done()
+
+	exit := make(chan bool)
+	*rr.close.Exit = append(*rr.close.Exit, exit)
+
+	dispose := func() {
+		// close connection
+		timeout := time.After(time.Millisecond * 5000)
+		closeResult := make(chan error)
+		go func() {
+			rr.pubSubConn.Conn.Send("PING")
+			rr.pubSubConn.Conn.Flush()
+			closeResult <- rr.pubSubConn.Close()
+		}()
+		select {
+		case <-timeout:
+			fmt.Println("waiting on close pub sub timeout")
+		case <-closeResult:
+			fmt.Println("waiting on close pub sub success")
+		}
+
+		// remove channel from in memory list
+		rr.mu.Lock()
+		defer rr.mu.Unlock()
+
+		var i int
+		var found bool
+		for i = 0; i < len(rr.establishedChannels); i++ {
+			if rr.establishedChannels[i] == channel {
+				found = true
+				break
+			}
+		}
+		if found {
+			copy(rr.establishedChannels[i:], rr.establishedChannels[i+1:])                  // shift down
+			rr.establishedChannels[len(rr.establishedChannels)-1] = ""                      // nil last element
+			rr.establishedChannels = rr.establishedChannels[:len(rr.establishedChannels)-1] // truncate slice
+		}
+	}
+
+	for {
+		receiver := make(chan interface{})
+		go func() {
+			receiver <- rr.pubSubConn.Receive()
+		}()
+		select {
+		case <-exit:
+			fmt.Println("disposing listener")
+			dispose()
+			fmt.Println("disposed listener")
+			return
+		case v := <-receiver:
+			switch v.(type) {
+			case redis.Message:
+				rr.Broadcast(&Message{Channel: channel, Data: v.(redis.Message).Data})
+			case redis.Subscription:
+				continue
+			case error:
+				fmt.Printf("Error while subscribed to Redis channel %s", v.(error))
+			default:
+			}
+		}
+	}
+}
+
 // Register the websocket connection with the receiver.
 func (rr *RedisReceiver) Register(connection *Connection) {
 	rr.newConnections <- connection
 }
 
-func sendToWebConns(i int, conns *[]*Connection, msg *Message, connMu *sync.Mutex) {
-	if i > len(*conns)-1 {
-		return
-	}
-	conn := (*conns)[i]
-	if conn.Channel == msg.Channel {
-		if err := conn.Websocket.WriteMessage(websocket.TextMessage, msg.Data); err != nil {
-			fmt.Printf("\nerr writing to socket: %s", err)
-
-			// This needs cleaning, not nice passing the lock in, can we use mutate?
-			connMu.Lock()
-			*conns = removeConn(*conns, conn)
-			connMu.Unlock()
-
-			sendToWebConns(i, conns, msg, connMu)
-			fmt.Printf("\n no. conns: %d", len(*conns))
-			return
-		}
-	}
-	i++
-	sendToWebConns(i, conns, msg, connMu)
-}
-
-func connHandler(rr *RedisReceiver) {
+func (rr *RedisReceiver) broadcaster() {
 	defer rr.close.Wg.Done()
 
 	exit := make(chan bool)
@@ -185,8 +171,27 @@ func connHandler(rr *RedisReceiver) {
 		conns = fn(conns, conn)
 	}
 
-	ensureRedisChannelUnsubscribe := func(msg *Message) {
-		// TODO delay this?
+	send := func(msg *Message) {
+		var iter func(i int)
+		iter = func(i int) {
+			if i > len(conns)-1 {
+				return
+			}
+			conn := conns[i]
+			if conn.Channel == msg.Channel {
+				if err := conn.Websocket.WriteMessage(websocket.TextMessage, msg.Data); err != nil {
+					mutateConns(conn, removeConn)
+					iter(i)
+					return
+				}
+			}
+			i++
+			iter(i)
+		}
+		iter(0)
+	}
+
+	checkChannel := func(msg *Message) {
 		rr.mu.Lock()
 		defer rr.mu.Unlock()
 
@@ -211,8 +216,29 @@ func connHandler(rr *RedisReceiver) {
 			}
 			if exists {
 				rr.establishedChannels = append(rr.establishedChannels[:i], rr.establishedChannels[i+1:]...)
-				fmt.Printf("\nunsubscribing channel: %s", msg.Channel)
 				rr.pubSubConn.Unsubscribe(msg.Channel)
+			}
+		}
+	}
+
+	dispose := func() {
+		connMu.Lock()
+		defer connMu.Unlock()
+
+		if len(conns) > 0 {
+			err := make(chan error)
+
+			go func() {
+				for _, c := range conns {
+					err <- c.Websocket.Close()
+				}
+				close(err)
+			}()
+
+			for e := range err {
+				if e != nil {
+					fmt.Printf("\n closing web socket error: %t", e == nil)
+				}
 			}
 		}
 	}
@@ -220,17 +246,13 @@ func connHandler(rr *RedisReceiver) {
 	for {
 		select {
 		case <-exit:
-			fmt.Println("exiting conn handler")
-			rr.destroyWebsockets(conns)
+			fmt.Println("disposing broadcaster")
+			dispose()
+			fmt.Println("disposed broadcaster")
 			return
 		case msg := <-rr.messages:
-			fmt.Printf("\ngot msg: %s", msg)
-			fmt.Printf("\nno of conns before: %d", len(conns))
-
-			sendToWebConns(0, &conns, msg, connMu)
-			fmt.Printf("\nno conns after: %d", len(conns))
-
-			go ensureRedisChannelUnsubscribe(msg)
+			send(msg)
+			go checkChannel(msg)
 		case conn := <-rr.newConnections:
 			go mutateConns(conn, appendConn)
 		}
@@ -251,10 +273,12 @@ func removeConn(conns []*Connection, remove *Connection) []*Connection {
 			break
 		}
 	}
+
 	if !found {
-		fmt.Printf("\nconns: %#v\nconn: %#v", conns, remove)
-		panic("Conn not found")
+		// log
+		return conns
 	}
+
 	copy(conns[i:], conns[i+1:]) // shift down
 	conns[len(conns)-1] = nil    // nil last element
 	return conns[:len(conns)-1]  // truncate slice

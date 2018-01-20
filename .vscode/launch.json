@@ -30,7 +30,7 @@
       "args": [
         "-test.v",
         "-test.run",  
-        "Test_MultiServer_MultipleBagExists_ConnectMultiWebSockets_BagsUpdated_WebSocketsUpdated"
+        "Test_SingleServer_BagExists_SingleWebSocket_BagUpdated_WebSocketUpdated"
       ],
       "showLog": false
     }
