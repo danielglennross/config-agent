@@ -8,12 +8,13 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/danielglennross/config-agent/broadcast"
+
 	"github.com/Sirupsen/logrus"
 
 	"github.com/danielglennross/config-agent/err"
-	"github.com/danielglennross/config-agent/hub"
-	"github.com/danielglennross/config-agent/redis"
 	"github.com/danielglennross/config-agent/routing"
+	"github.com/danielglennross/config-agent/store"
 )
 
 var (
@@ -26,18 +27,20 @@ func main() {
 		Wg:   &sync.WaitGroup{},
 	}
 
-	redisPool, err := redis.NewRedisPoolFromURL("redis://localhost:6379")
+	redisPool, err := broadcast.NewRedisPoolFromURL("redis://localhost:6379")
 	if err != nil {
 		fmt.Printf("\nerror: %s", err)
 		return
 	}
 
-	h := hub.NewHub(redisPool)
-	rr := redis.NewReceiver(redisPool, close)
-	rw := redis.NewWriter(redisPool, close)
+	st := store.NewRedisBagStore(redisPool)
+	br := broadcast.NewRedisReceiver(redisPool, close)
+	bw := broadcast.NewRedisWriter(redisPool, close)
 
-	rr.Init()
-	go rw.Run()
+	br.Init()
+	bw.Init()
+
+	go bw.Run()
 
 	srv := &http.Server{Addr: ":8080"}
 
@@ -48,7 +51,7 @@ func main() {
 		}
 	}()
 
-	r := routing.NewRouter(h, rr, rw)
+	r := routing.NewRouter(st, br, bw)
 	http.Handle("/", r)
 
 	close.Wg.Add(1)
@@ -56,7 +59,6 @@ func main() {
 
 	close.Wg.Wait()
 
-	//rr.Destroy()
 	srv.Shutdown(nil)
 }
 

@@ -5,16 +5,17 @@ import (
 	"net/http/httptest"
 	"sync"
 
+	"github.com/danielglennross/config-agent/broadcast"
+
 	"github.com/danielglennross/config-agent/err"
-	"github.com/danielglennross/config-agent/hub"
-	"github.com/danielglennross/config-agent/redis"
 	"github.com/danielglennross/config-agent/routing"
+	"github.com/danielglennross/config-agent/store"
 	redigo "github.com/garyburd/redigo/redis"
 )
 
 // CreateRedisPool create a redis pool
 func CreateRedisPool(setupPool func(c redigo.Conn) error) (*redigo.Pool, error) {
-	redisPool, err := redis.NewRedisPoolFromURL("redis://localhost:6379")
+	redisPool, err := broadcast.NewRedisPoolFromURL("redis://localhost:6379")
 	if err != nil {
 		return nil, err
 	}
@@ -31,25 +32,27 @@ func CreateRedisPool(setupPool func(c redigo.Conn) error) (*redigo.Pool, error) 
 }
 
 // CreateServer create a test server
-func CreateServer(redisPool *redigo.Pool, setupHub func(h *hub.Hub) error) (*Server, func() error, error) {
+func CreateServer(redisPool *redigo.Pool, setupStore func(store store.BagStore) error) (*Server, func() error, error) {
 	close := &err.Close{
 		Exit: &[]chan bool{},
 		Wg:   &sync.WaitGroup{},
 	}
 
-	h := hub.NewHub(redisPool)
-	err := setupHub(h)
+	st := store.NewRedisBagStore(redisPool)
+	err := setupStore(st)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	rr := redis.NewReceiver(redisPool, close)
-	rw := redis.NewWriter(redisPool, close)
+	br := broadcast.NewRedisReceiver(redisPool, close)
+	bw := broadcast.NewRedisWriter(redisPool, close)
 
-	rr.Init()
-	go rw.Run()
+	br.Init()
+	bw.Init()
 
-	server := httptest.NewServer(routing.NewRouter(h, rr, rw))
+	go bw.Run()
+
+	server := httptest.NewServer(routing.NewRouter(st, br, bw))
 	fmt.Println(server.URL)
 
 	var tearDowns []func()

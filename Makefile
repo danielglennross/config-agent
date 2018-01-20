@@ -10,4 +10,5 @@ build:
 	go build
 
 test:
+	exec C:/Users/Daniel/Desktop/Redis/redis-server.exe 1> /dev/null &
 	go test -v ./...

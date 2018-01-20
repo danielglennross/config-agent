@@ -5,13 +5,13 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/danielglennross/config-agent/hub"
+	"github.com/danielglennross/config-agent/store"
 	"github.com/danielglennross/config-agent/test"
 	redigo "github.com/garyburd/redigo/redis"
 	"github.com/gorilla/websocket"
 )
 
-func createServerAndRedisPool() (server *test.Server, destroyServer func() error, pool *redigo.Pool, err error) {
+func createServerAndRedisPool(bag string) (server *test.Server, destroyServer func() error, pool *redigo.Pool, err error) {
 	pool, err = test.CreateRedisPool(func(c redigo.Conn) (err error) {
 		_, err = c.Do("FLUSHALL")
 		return
@@ -21,14 +21,14 @@ func createServerAndRedisPool() (server *test.Server, destroyServer func() error
 		return
 	}
 
-	server, destroyServer, err = test.CreateServer(pool, func(h *hub.Hub) error {
-		return h.DelBag("testbag")
+	server, destroyServer, err = test.CreateServer(pool, func(store store.BagStore) error {
+		return store.Del(bag)
 	})
 
 	return
 }
 
-func createServersAndRedisPool(numberOfServers int) (servers []*test.Server, destroyServers func() error, pool *redigo.Pool, err error) {
+func createServersAndRedisPool(bags []string) (servers []*test.Server, destroyServers func() error, pool *redigo.Pool, err error) {
 	pool, err = test.CreateRedisPool(func(c redigo.Conn) (err error) {
 		_, err = c.Do("FLUSHALL")
 		return
@@ -39,9 +39,9 @@ func createServersAndRedisPool(numberOfServers int) (servers []*test.Server, des
 	}
 
 	var cleanUp []func() error
-	for i := 0; i < numberOfServers; i++ {
-		server, destroyServer, err := test.CreateServer(pool, func(h *hub.Hub) error {
-			return h.DelBag("testbag")
+	for i := 0; i < len(bags); i++ {
+		server, destroyServer, err := test.CreateServer(pool, func(store store.BagStore) error {
+			return store.Del(bags[i])
 		})
 		if err != nil {
 			return nil, nil, nil, err
@@ -65,7 +65,7 @@ func createServersAndRedisPool(numberOfServers int) (servers []*test.Server, des
 }
 
 func Test_SingleServer_BagExists_SingleWebSocket_BagUpdated_WebSocketUpdated(t *testing.T) {
-	server, destroyServer, pool, err := createServerAndRedisPool()
+	server, destroyServer, pool, err := createServerAndRedisPool("testbag")
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -134,7 +134,7 @@ func Test_SingleServer_BagExists_SingleWebSocket_BagUpdated_WebSocketUpdated(t *
 }
 
 func Test_SingleServer_BagMissing_SingleWebSocket_BagUpdated_WebSocketUpdated(t *testing.T) {
-	server, destroyServer, pool, err := createServerAndRedisPool()
+	server, destroyServer, pool, err := createServerAndRedisPool("testbag")
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -197,7 +197,7 @@ func Test_SingleServer_BagMissing_SingleWebSocket_BagUpdated_WebSocketUpdated(t 
 }
 
 func Test_SingleServer_BagExists_SingleWebSocket_BagUpdatedTwice_WebSocketUpdated(t *testing.T) {
-	server, destroyServer, pool, err := createServerAndRedisPool()
+	server, destroyServer, pool, err := createServerAndRedisPool("testbag")
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -269,7 +269,7 @@ func Test_SingleServer_BagExists_SingleWebSocket_BagUpdatedTwice_WebSocketUpdate
 }
 
 func Test_SingleServer_BagExists_SingleWebSocket_DisconnectWebSocket_ConnnectWebSocket(t *testing.T) {
-	server, destroyServer, pool, err := createServerAndRedisPool()
+	server, destroyServer, pool, err := createServerAndRedisPool("testbag")
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -335,7 +335,7 @@ func Test_SingleServer_BagExists_SingleWebSocket_DisconnectWebSocket_ConnnectWeb
 }
 
 func Test_SingleServer_BagExists_SingleWebSocket_DisconnectWebSocket_UpdateBag_ConnnectWebSocket(t *testing.T) {
-	server, destroyServer, pool, err := createServerAndRedisPool()
+	server, destroyServer, pool, err := createServerAndRedisPool("testbag")
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -404,7 +404,7 @@ func Test_SingleServer_BagExists_SingleWebSocket_DisconnectWebSocket_UpdateBag_C
 }
 
 func Test_MultiServer_BagExists_ConnectMultiWebSockets(t *testing.T) {
-	servers, destroyServers, pool, err := createServersAndRedisPool(2)
+	servers, destroyServers, pool, err := createServersAndRedisPool([]string{"testbag", "testbag"})
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -483,7 +483,7 @@ func Test_MultiServer_BagExists_ConnectMultiWebSockets(t *testing.T) {
 }
 
 func Test_MultiServer_BagExists_ConnectMultiWebSockets_BagUpdated_WebSocketsUpdated(t *testing.T) {
-	servers, destroyServers, pool, err := createServersAndRedisPool(2)
+	servers, destroyServers, pool, err := createServersAndRedisPool([]string{"testbag", "testbag"})
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -592,7 +592,7 @@ func Test_MultiServer_BagExists_ConnectMultiWebSockets_BagUpdated_WebSocketsUpda
 }
 
 func Test_MultiServer_BagExists_ConnectWebsocket_BagUpdated_ConnectSecondWebsocket_WebSocketsUpdated(t *testing.T) {
-	servers, destroyServers, pool, err := createServersAndRedisPool(2)
+	servers, destroyServers, pool, err := createServersAndRedisPool([]string{"testbag", "testbag"})
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -687,7 +687,7 @@ func Test_MultiServer_BagExists_ConnectWebsocket_BagUpdated_ConnectSecondWebsock
 }
 
 func Test_MultiServer_MultipleBagExists_ConnectMultiWebSockets(t *testing.T) {
-	servers, destroyServers, pool, err := createServersAndRedisPool(2)
+	servers, destroyServers, pool, err := createServersAndRedisPool([]string{"testbag0", "testbag1"})
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -777,7 +777,7 @@ func Test_MultiServer_MultipleBagExists_ConnectMultiWebSockets(t *testing.T) {
 }
 
 func Test_MultiServer_MultipleBagExists_ConnectMultiWebSockets_BagsUpdated_WebSocketsUpdated(t *testing.T) {
-	servers, destroyServers, pool, err := createServersAndRedisPool(2)
+	servers, destroyServers, pool, err := createServersAndRedisPool([]string{"testbag0", "testbag1"})
 	if err != nil {
 		t.Fatal(err)
 		return

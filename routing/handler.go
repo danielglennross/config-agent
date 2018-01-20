@@ -2,15 +2,15 @@ package routing
 
 import (
 	"github.com/danielglennross/config-agent/api"
-	"github.com/danielglennross/config-agent/hub"
-	"github.com/danielglennross/config-agent/redis"
+	"github.com/danielglennross/config-agent/broadcast"
+	"github.com/danielglennross/config-agent/store"
 	"github.com/gorilla/mux"
 )
 
 // NewRouter ctor
-func NewRouter(h *hub.Hub, rr *redis.Receiver, rw *redis.Writer) *mux.Router {
+func NewRouter(store store.BagStore, br broadcast.Receiver, bw broadcast.Writer) *mux.Router {
 	r := mux.NewRouter()
-	r.HandleFunc("/config/{bag}", api.HandleWebsocket(h, rr)).Methods("GET")
-	r.HandleFunc("/config/{bag}", api.UpdateBagHandler(h, rw)).Methods("PUT")
+	r.HandleFunc("/config/{bag}", api.HandleWebsocket(store, br)).Methods("GET")
+	r.HandleFunc("/config/{bag}", api.UpdateBagHandler(store, bw)).Methods("PUT")
 	return r
 }

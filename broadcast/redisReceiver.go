@@ -1,70 +1,91 @@
-package redis
+package broadcast
 
 import (
 	"fmt"
 	"sync"
-	"time"
-
-	"github.com/gorilla/websocket"
 
 	"github.com/danielglennross/config-agent/err"
 	"github.com/garyburd/redigo/redis"
+	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
 )
 
-// todo - figure out when to remove a channel from here (when all disconnected?) - DONE
-// todo - THIS IS SINGLETON for all test servers, make per-server
+type mutateConnection func(conns []*Connection, add *Connection) []*Connection
 
-// var establishedChannels []string
-
-// Receiver receives messages from Redis and broadcasts them to all
+// RedisReceiver receives messages from Redis and broadcasts them to all
 // registered websocket connections that are Registered.
-type Receiver struct {
+type RedisReceiver struct {
 	mu                  *sync.Mutex
-	pool                *redis.Pool
+	pubSubConnFactory   func() *redis.PubSubConn
 	pubSubConn          *redis.PubSubConn
 	close               *err.Close
 	establishedChannels []string
 
 	messages       chan *Message
 	newConnections chan *Connection
-	rmConnections  chan *Connection
 }
 
-// NewReceiver creates a redisReceiver that will use the provided
-// rredis.Pool.
-func NewReceiver(pool *redis.Pool, close *err.Close) *Receiver {
-	return &Receiver{
-		mu:             &sync.Mutex{},
-		pool:           pool,
+// NewRedisReceiver creates a redisReceiver that will use the provided
+// redis.Pool.
+func NewRedisReceiver(pool *redis.Pool, close *err.Close) Receiver {
+	return &RedisReceiver{
+		mu: &sync.Mutex{},
+		pubSubConnFactory: func() *redis.PubSubConn {
+			conn := pool.Get()
+			return &redis.PubSubConn{Conn: conn}
+		},
 		pubSubConn:     nil,
 		close:          close,
 		messages:       make(chan *Message, 1000), // 1000 is arbitrary
 		newConnections: make(chan *Connection),
-		rmConnections:  make(chan *Connection),
 	}
 }
 
 // Init init pubsub
-func (rr *Receiver) Init() {
-	conn := rr.pool.Get()
-	rr.pubSubConn = &redis.PubSubConn{Conn: conn}
+func (rr *RedisReceiver) Init() {
+	rr.pubSubConn = rr.pubSubConnFactory()
 }
 
-//Destroy pubsub
-func (rr *Receiver) Destroy() {
+func (rr *RedisReceiver) destroyWebsockets(conns []*Connection) {
+	err := make(chan error)
+
+	for _, c := range conns {
+		go func(c *Connection) {
+			err <- c.Websocket.Close()
+		}(c)
+	}
+
+	for e := range err {
+		fmt.Println(e)
+	}
+}
+
+func (rr *RedisReceiver) destroyRedis(channel string) {
+	// close connection
 	rr.pubSubConn.Close()
-}
 
-// Wait wait
-func (rr *Receiver) Wait(_ time.Time) error {
-	time.Sleep(time.Second * 10)
-	return nil
+	// remove channel from in memory list
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+
+	var i int
+	var found bool
+	for i = 0; i < len(rr.establishedChannels); i++ {
+		if rr.establishedChannels[i] == channel {
+			found = true
+			break
+		}
+	}
+	if found {
+		copy(rr.establishedChannels[i:], rr.establishedChannels[i+1:])                  // shift down
+		rr.establishedChannels[len(rr.establishedChannels)-1] = ""                      // nil last element
+		rr.establishedChannels = rr.establishedChannels[:len(rr.establishedChannels)-1] // truncate slice
+	}
 }
 
 // Run receives pubsub messages from Redis after establishing a connection.
 // When a valid message is received it is broadcast to all connected websockets
-func (rr *Receiver) Run(channel string) error {
+func (rr *RedisReceiver) Run(channel string) error {
 	rr.mu.Lock()
 
 	for _, existing := range rr.establishedChannels {
@@ -92,13 +113,12 @@ func (rr *Receiver) Run(channel string) error {
 		fmt.Println("waiting for msg...")
 		receiver := make(chan interface{})
 		go func() {
-			//receiver <- psc.Receive()
 			receiver <- rr.pubSubConn.Receive()
 		}()
 		select {
 		case <-exit:
 			fmt.Println("exiting receiver run")
-			rr.Destroy()
+			rr.destroyRedis(channel)
 			return nil
 		case v := <-receiver:
 			fmt.Printf("\ngot msg type: %s - %v", v, v)
@@ -118,21 +138,16 @@ func (rr *Receiver) Run(channel string) error {
 // Broadcast the provided message to all connected websocket connections.
 // If an error occurs while writting a message to a websocket connection it is
 // closed and deregistered.
-func (rr *Receiver) Broadcast(msg *Message) {
+func (rr *RedisReceiver) Broadcast(msg *Message) {
 	rr.messages <- msg
 }
 
 // Register the websocket connection with the receiver.
-func (rr *Receiver) Register(connection *Connection) {
+func (rr *RedisReceiver) Register(connection *Connection) {
 	rr.newConnections <- connection
 }
 
-// DeRegister the connection by closing it and removing it from our list.
-func (rr *Receiver) DeRegister(connection *Connection) {
-	rr.rmConnections <- connection
-}
-
-func sendToWebConns(i int, conns *[]*Connection, msg *Message) {
+func sendToWebConns(i int, conns *[]*Connection, msg *Message, connMu *sync.Mutex) {
 	if i > len(*conns)-1 {
 		return
 	}
@@ -140,70 +155,91 @@ func sendToWebConns(i int, conns *[]*Connection, msg *Message) {
 	if conn.Channel == msg.Channel {
 		if err := conn.Websocket.WriteMessage(websocket.TextMessage, msg.Data); err != nil {
 			fmt.Printf("\nerr writing to socket: %s", err)
+
+			// This needs cleaning, not nice passing the lock in, can we use mutate?
+			connMu.Lock()
 			*conns = removeConn(*conns, conn)
-			sendToWebConns(i, conns, msg)
+			connMu.Unlock()
+
+			sendToWebConns(i, conns, msg, connMu)
 			fmt.Printf("\n no. conns: %d", len(*conns))
 			return
 		}
 	}
 	i++
-	sendToWebConns(i, conns, msg)
+	sendToWebConns(i, conns, msg, connMu)
 }
 
-func connHandler(rr *Receiver) {
+func connHandler(rr *RedisReceiver) {
 	defer rr.close.Wg.Done()
 
 	exit := make(chan bool)
 	*rr.close.Exit = append(*rr.close.Exit, exit)
 
+	connMu := &sync.Mutex{}
 	conns := make([]*Connection, 0)
+
+	mutateConns := func(conn *Connection, fn mutateConnection) {
+		connMu.Lock()
+		defer connMu.Unlock()
+		conns = fn(conns, conn)
+	}
+
+	ensureRedisChannelUnsubscribe := func(msg *Message) {
+		// TODO delay this?
+		rr.mu.Lock()
+		defer rr.mu.Unlock()
+
+		connMu.Lock()
+		defer connMu.Unlock()
+
+		found := false
+		for _, conn := range conns {
+			if conn.Channel == msg.Channel {
+				found = true
+			}
+		}
+
+		if !found {
+			var i int
+			var exists = false
+			for i = 0; i < len(rr.establishedChannels); i++ {
+				if rr.establishedChannels[i] == msg.Channel {
+					exists = true
+					break
+				}
+			}
+			if exists {
+				rr.establishedChannels = append(rr.establishedChannels[:i], rr.establishedChannels[i+1:]...)
+				fmt.Printf("\nunsubscribing channel: %s", msg.Channel)
+				rr.pubSubConn.Unsubscribe(msg.Channel)
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-exit:
 			fmt.Println("exiting conn handler")
+			rr.destroyWebsockets(conns)
 			return
 		case msg := <-rr.messages:
 			fmt.Printf("\ngot msg: %s", msg)
 			fmt.Printf("\nno of conns before: %d", len(conns))
 
-			//fmt.Printf("conn[0] %v\n", conns[0])
-
-			sendToWebConns(0, &conns, msg)
+			sendToWebConns(0, &conns, msg, connMu)
 			fmt.Printf("\nno conns after: %d", len(conns))
 
-			// TODO delay this?
-			go func() {
-				rr.mu.Lock()
-				found := false
-				for _, conn := range conns {
-					if conn.Channel == msg.Channel {
-						found = true
-					}
-				}
-				if !found {
-					var i int
-					var exists = false
-					for i = 0; i < len(rr.establishedChannels); i++ {
-						if rr.establishedChannels[i] == msg.Channel {
-							exists = true
-							break
-						}
-					}
-					if exists {
-						rr.establishedChannels = append(rr.establishedChannels[:i], rr.establishedChannels[i+1:]...)
-						fmt.Printf("\nunsubscribing channel: %s", msg.Channel)
-						rr.pubSubConn.Unsubscribe(msg.Channel)
-					}
-				}
-				rr.mu.Unlock()
-			}()
-
+			go ensureRedisChannelUnsubscribe(msg)
 		case conn := <-rr.newConnections:
-			conns = append(conns, conn)
-		case conn := <-rr.rmConnections:
-			conns = removeConn(conns, conn)
+			go mutateConns(conn, appendConn)
 		}
 	}
+}
+
+func appendConn(conns []*Connection, add *Connection) []*Connection {
+	conns = append(conns, add)
+	return conns
 }
 
 func removeConn(conns []*Connection, remove *Connection) []*Connection {

@@ -1,4 +1,4 @@
-package redis
+package broadcast
 
 import (
 	"fmt"
@@ -8,28 +8,38 @@ import (
 	"github.com/pkg/errors"
 )
 
-// Writer publishes messages to the Redis CHANNEL
-type Writer struct {
-	pool  *redis.Pool
-	close *err.Close
+// RedisWriter publishes messages to the Redis CHANNEL
+type RedisWriter struct {
+	connFactory func() redis.Conn
+	conn        redis.Conn
+	close       *err.Close
 
 	messages chan *Message
 }
 
-// NewWriter ctor
-func NewWriter(pool *redis.Pool, close *err.Close) *Writer {
-	return &Writer{
-		pool:     pool,
+// NewRedisWriter ctor
+func NewRedisWriter(pool *redis.Pool, close *err.Close) Writer {
+	return &RedisWriter{
+		connFactory: func() redis.Conn {
+			return pool.Get()
+		},
+		conn:     nil,
 		close:    close,
 		messages: make(chan *Message, 10000),
 	}
 }
 
-// Run the main redisWriter loop that publishes incoming messages to Redis.
-func (rw *Writer) Run() {
-	conn := rw.pool.Get()
-	defer conn.Close()
+// Init init
+func (rw *RedisWriter) Init() {
+	rw.conn = rw.connFactory()
+}
 
+func (rw *RedisWriter) destroyRedis() {
+	rw.conn.Close()
+}
+
+// Run the main redisWriter loop that publishes incoming messages to Redis.
+func (rw *RedisWriter) Run() {
 	rw.close.Wg.Add(1)
 	defer rw.close.Wg.Done()
 
@@ -40,13 +50,19 @@ func (rw *Writer) Run() {
 		select {
 		case <-exit:
 			fmt.Println("exiting writer run")
+			rw.destroyRedis()
 			return
 		case msg := <-rw.messages:
-			if err := writeToRedis(conn, msg); err != nil {
+			if err := writeToRedis(rw.conn, msg); err != nil {
 				rw.Publish(msg) // attempt to redeliver later
 			}
 		}
 	}
+}
+
+// Publish to Redis via channel.
+func (rw *RedisWriter) Publish(message *Message) {
+	rw.messages <- message
 }
 
 func writeToRedis(conn redis.Conn, message *Message) error {
@@ -57,9 +73,4 @@ func writeToRedis(conn redis.Conn, message *Message) error {
 		return errors.Wrap(err, "Unable to flush published message to Redis")
 	}
 	return nil
-}
-
-// Publish to Redis via channel.
-func (rw *Writer) Publish(message *Message) {
-	rw.messages <- message
 }
