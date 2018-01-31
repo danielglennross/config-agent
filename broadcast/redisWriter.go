@@ -46,7 +46,9 @@ func (rw *RedisWriter) Run() {
 	defer rw.close.Wg.Done()
 
 	exit := make(chan bool)
+	rw.close.Mu.Lock()
 	*rw.close.Exit = append(*rw.close.Exit, exit)
+	rw.close.Mu.Unlock()
 
 	writeToRedis := func(msg *Message) error {
 		if err := rw.conn.Send("PUBLISH", msg.Channel, msg.Data); err != nil {

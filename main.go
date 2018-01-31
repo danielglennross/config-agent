@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -9,34 +8,37 @@ import (
 	"syscall"
 
 	"github.com/danielglennross/config-agent/broadcast"
-
-	"github.com/Sirupsen/logrus"
-
 	"github.com/danielglennross/config-agent/err"
+	"github.com/danielglennross/config-agent/logger"
 	"github.com/danielglennross/config-agent/routing"
 	"github.com/danielglennross/config-agent/store"
 )
 
 /*
+websocket:
 curl --include --no-buffer --header "Connection: Upgrade" --header "Upgrade: websocket" --header "Host: localhost:8080" --header "Origin: http://localhost:8080" --header "Sec-WebSocket-Key: SGVsbG8sIHdvcmxkIQ==" --header "Sec-WebSocket-Version: 13" --header "X-Correlation-Token: test" http://localhost:8080/config/testbag
 
+update bag:
 curl -X PUT -d "{\"key1\":\"value\"}" -H "X-Correlation-Token: test" http://localhost:8080/config/testbag
 */
 
 var (
-	log = logrus.WithField("app", "config-agent")
+	log = logger.NewLogger(logger.Fields{
+		"file": "main",
+	})
 )
 
 func main() {
 	close := &err.Close{
+		Mu:   &sync.Mutex{},
 		Exit: &[]chan bool{},
 		Wg:   &sync.WaitGroup{},
 	}
 
 	redisPool, err := broadcast.NewRedisPoolFromURL("redis://localhost:6379")
 	if err != nil {
-		fmt.Printf("\nerror: %s", err)
-		return
+		log.Fatal("Failed to fetch redis pool", err)
+		os.Exit(1)
 	}
 
 	st := store.NewRedisBagStore(redisPool)
@@ -52,7 +54,7 @@ func main() {
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
-			log.WithError(err).Fatal("Failed to run server")
+			log.Fatal("Failed to run server", err)
 			os.Exit(1)
 		}
 	}()
@@ -63,11 +65,16 @@ func main() {
 	close.Wg.Add(1)
 	go handleSignal(close)
 
+	log.Info("Server running", logger.Fields{
+		"add": srv.Addr,
+	})
+
 	close.Wg.Wait()
-	fmt.Println("clossssed")
 
 	redisPool.Close()
 	srv.Shutdown(nil)
+
+	log.InfoMsg("App killed")
 }
 
 func handleSignal(close *err.Close) {
@@ -82,7 +89,9 @@ func handleSignal(close *err.Close) {
 	)
 
 	sig := <-c
-	fmt.Printf("\nreceived %s signal, stopping profiles gracefully\n", sig)
+	log.Info("Received signal, stopping gracefully", logger.Fields{
+		"signal": sig,
+	})
 
 	for _, exit := range *close.Exit {
 		exit <- true

@@ -108,6 +108,9 @@ func HandleWebsocket(store store.BagStore, br broadcast.Receiver) func(w http.Re
 			return
 		}
 
-		ws.WriteMessage(websocket.TextMessage, data)
+		br.Message(&broadcast.WebSocketMsg{Conn: ws, Data: data})
+		<-br.WsChan()
+
+		//ws.WriteMessage(websocket.TextMessage, data)
 	}
 }

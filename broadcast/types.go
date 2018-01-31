@@ -15,12 +15,21 @@ type Connection struct {
 	Websocket *websocket.Conn
 }
 
+// WebSocketMsg webSocketMsg
+type WebSocketMsg struct {
+	Data []byte
+	Conn *websocket.Conn
+}
+
 // Receiver receiver
 type Receiver interface {
 	Init()
 	Run(channel string)
 	Broadcast(msg *Message)
 	Register(connection *Connection)
+
+	Message(webSocketMsg *WebSocketMsg)
+	WsChan() chan error
 }
 
 // Writer writer

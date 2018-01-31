@@ -15,21 +15,28 @@ type mutateConnection func(conns []*Connection, add *Connection) []*Connection
 // RedisReceiver receives messages from Redis and broadcasts them to all
 // registered websocket connections that are Registered.
 type RedisReceiver struct {
-	mu                  *sync.Mutex
-	pubSubConnFactory   func() *redis.PubSubConn
-	pubSubConn          *redis.PubSubConn
+	mu *sync.Mutex
+
+	pubSubMu          *sync.Mutex
+	pubSubConnFactory func() *redis.PubSubConn
+	pubSubConn        *redis.PubSubConn
+
 	close               *err.Close
 	establishedChannels []string
 
 	messages       chan *Message
 	newConnections chan *Connection
+
+	sockets chan *WebSocketMsg
+	wsChan  chan error
 }
 
 // NewRedisReceiver creates a redisReceiver that will use the provided
 // redis.Pool.
 func NewRedisReceiver(pool *redis.Pool, close *err.Close) Receiver {
 	return &RedisReceiver{
-		mu: &sync.Mutex{},
+		mu:       &sync.Mutex{},
+		pubSubMu: &sync.Mutex{},
 		pubSubConnFactory: func() *redis.PubSubConn {
 			conn := pool.Get()
 			return &redis.PubSubConn{Conn: conn}
@@ -38,7 +45,14 @@ func NewRedisReceiver(pool *redis.Pool, close *err.Close) Receiver {
 		close:          close,
 		messages:       make(chan *Message, 1000), // 1000 is arbitrary
 		newConnections: make(chan *Connection),
+		sockets:        make(chan *WebSocketMsg),
+		wsChan:         make(chan error),
 	}
+}
+
+// WsChan websocket message channel
+func (rr *RedisReceiver) WsChan() chan error {
+	return rr.wsChan
 }
 
 // Init init pubsub
@@ -89,13 +103,17 @@ func (rr *RedisReceiver) listener(channel string) {
 	defer rr.close.Wg.Done()
 
 	exit := make(chan bool)
+	rr.close.Mu.Lock()
 	*rr.close.Exit = append(*rr.close.Exit, exit)
+	rr.close.Mu.Unlock()
 
 	dispose := func() {
 		// close connection
 		timeout := time.After(time.Millisecond * 5000)
 		closeResult := make(chan error)
 		go func() {
+			rr.pubSubMu.Lock()
+			defer rr.pubSubMu.Unlock()
 			rr.pubSubConn.Conn.Send("PING")
 			rr.pubSubConn.Conn.Flush()
 			closeResult <- rr.pubSubConn.Close()
@@ -129,6 +147,8 @@ func (rr *RedisReceiver) listener(channel string) {
 	for {
 		receiver := make(chan interface{})
 		go func() {
+			rr.pubSubMu.Lock()
+			defer rr.pubSubMu.Unlock()
 			receiver <- rr.pubSubConn.Receive()
 		}()
 		select {
@@ -151,6 +171,11 @@ func (rr *RedisReceiver) listener(channel string) {
 	}
 }
 
+// Message sync web socket sending
+func (rr *RedisReceiver) Message(webSocketMsg *WebSocketMsg) {
+	rr.sockets <- webSocketMsg
+}
+
 // Register the websocket connection with the receiver.
 func (rr *RedisReceiver) Register(connection *Connection) {
 	rr.newConnections <- connection
@@ -159,8 +184,17 @@ func (rr *RedisReceiver) Register(connection *Connection) {
 func (rr *RedisReceiver) broadcaster() {
 	defer rr.close.Wg.Done()
 
-	exit := make(chan bool)
-	*rr.close.Exit = append(*rr.close.Exit, exit)
+	exitWsMsger := make(chan bool)
+	rr.close.Mu.Lock()
+	*rr.close.Exit = append(*rr.close.Exit, exitWsMsger)
+	rr.close.Mu.Unlock()
+
+	exitBroadcaster := make(chan bool)
+	rr.close.Mu.Lock()
+	*rr.close.Exit = append(*rr.close.Exit, exitBroadcaster)
+	rr.close.Mu.Unlock()
+
+	//wsChan := make(chan error)
 
 	connMu := &sync.Mutex{}
 	conns := make([]*Connection, 0)
@@ -174,12 +208,18 @@ func (rr *RedisReceiver) broadcaster() {
 	send := func(msg *Message) {
 		var iter func(i int)
 		iter = func(i int) {
+			connMu.Lock()
 			if i > len(conns)-1 {
+				connMu.Unlock()
 				return
 			}
+			connMu.Unlock()
+
 			conn := conns[i]
 			if conn.Channel == msg.Channel {
-				if err := conn.Websocket.WriteMessage(websocket.TextMessage, msg.Data); err != nil {
+				rr.Message(&WebSocketMsg{Conn: conn.Websocket, Data: msg.Data})
+				if err := <-rr.wsChan; err != nil {
+					//if err := conn.Websocket.WriteMessage(websocket.TextMessage, msg.Data); err != nil {
 					mutateConns(conn, removeConn)
 					iter(i)
 					return
@@ -243,9 +283,21 @@ func (rr *RedisReceiver) broadcaster() {
 		}
 	}
 
+	go func() {
+		for {
+			select {
+			case <-exitWsMsger:
+				fmt.Println("disposed ws messager")
+				return
+			case wsm := <-rr.sockets:
+				rr.wsChan <- wsm.Conn.WriteMessage(websocket.TextMessage, wsm.Data)
+			}
+		}
+	}()
+
 	for {
 		select {
-		case <-exit:
+		case <-exitBroadcaster:
 			fmt.Println("disposing broadcaster")
 			dispose()
 			fmt.Println("disposed broadcaster")

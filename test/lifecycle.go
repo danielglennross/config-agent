@@ -34,6 +34,7 @@ func CreateRedisPool(setupPool func(c redigo.Conn) error) (*redigo.Pool, error) 
 // CreateServer create a test server
 func CreateServer(redisPool *redigo.Pool, setupStore func(store store.BagStore) error) (*Server, func() error, error) {
 	close := &err.Close{
+		Mu:   &sync.Mutex{},
 		Exit: &[]chan bool{},
 		Wg:   &sync.WaitGroup{},
 	}
