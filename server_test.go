@@ -463,20 +463,29 @@ func Test_MultiServer_BagExists_ConnectMultiWebSockets(t *testing.T) {
 
 	wgs.Wait()
 
-	wgs.Add(len(servers))
+	//wgs.Add(len(servers))
 
-	for _, s := range servers {
-		go func(server *test.Server) {
-			removed, err := server.VerifyChannelRemoved(pool, "testbag", &config)
+	returnChan := make(chan error)
+	go func() {
+		for _, s := range servers {
+			removed, err := s.VerifyChannelRemoved(pool, "testbag", &config)
 			if err != nil {
-				t.Fatal(err)
+				returnChan <- err
 				return
 			}
 			if !removed {
-				t.Errorf("channel was not removed")
+				returnChan <- fmt.Errorf("channel was not removed")
 				return
 			}
-		}(s)
+			returnChan <- nil
+		}
+		close(returnChan)
+	}()
+
+	for returnErr := range returnChan {
+		if returnErr != nil {
+			t.Fatal(returnErr)
+		}
 	}
 
 	destroyServers()
@@ -518,16 +527,16 @@ func Test_MultiServer_BagExists_ConnectMultiWebSockets_BagUpdated_WebSocketsUpda
 	var wgs sync.WaitGroup
 	wgs.Add(len(servers))
 
-	var conns []*websocket.Conn
-	for _, s := range servers {
-		go func(server *test.Server) {
+	connsChan := make(chan *websocket.Conn)
+	go func() {
+		for _, s := range servers {
 			defer wgs.Done()
-			c, err := server.CreateWebSocket("testbag")
+			c, err := s.CreateWebSocket("testbag")
 			if err != nil {
 				t.Fatal(err)
 				return
 			}
-			conns = append(conns, c)
+			connsChan <- c
 
 			var wg sync.WaitGroup
 			wg.Add(1)
@@ -535,7 +544,13 @@ func Test_MultiServer_BagExists_ConnectMultiWebSockets_BagUpdated_WebSocketsUpda
 			go readWebsocket(c, &wg)
 
 			wg.Wait()
-		}(s)
+		}
+		close(connsChan)
+	}()
+
+	var conns []*websocket.Conn
+	for chn := range connsChan {
+		conns = append(conns, chn)
 	}
 
 	wgs.Wait()
@@ -543,9 +558,9 @@ func Test_MultiServer_BagExists_ConnectMultiWebSockets_BagUpdated_WebSocketsUpda
 	config = &test.Config{Key: "updated-value"}
 
 	// populate only on one server
-	_, err = servers[0].PopulateBag("testbag", config)
-	if err != nil {
-		t.Fatal(err)
+	_, bagErr := servers[0].PopulateBag("testbag", config)
+	if bagErr != nil {
+		t.Fatal(bagErr)
 		return
 	}
 
@@ -562,7 +577,7 @@ func Test_MultiServer_BagExists_ConnectMultiWebSockets_BagUpdated_WebSocketsUpda
 
 			wg.Wait()
 
-			err = c.Close()
+			err := c.Close()
 			if err != nil {
 				t.Fatal(err)
 				return
@@ -572,20 +587,29 @@ func Test_MultiServer_BagExists_ConnectMultiWebSockets_BagUpdated_WebSocketsUpda
 
 	wgs.Wait()
 
-	wgs.Add(len(servers))
+	//wgs.Add(len(servers))
 
-	for _, s := range servers {
-		go func(server *test.Server) {
-			removed, err := server.VerifyChannelRemoved(pool, "testbag", &test.Config{})
+	returnChan := make(chan error)
+	go func() {
+		for _, s := range servers {
+			removed, err := s.VerifyChannelRemoved(pool, "testbag", &test.Config{})
 			if err != nil {
-				t.Fatal(err)
+				returnChan <- err
 				return
 			}
 			if !removed {
-				t.Errorf("channel was not removed")
+				returnChan <- fmt.Errorf("channel was not removed")
 				return
 			}
-		}(s)
+			returnChan <- nil
+		}
+		close(returnChan)
+	}()
+
+	for returnErr := range returnChan {
+		if returnErr != nil {
+			t.Fatal(returnErr)
+		}
 	}
 
 	destroyServers()
@@ -669,18 +693,30 @@ func Test_MultiServer_BagExists_ConnectWebsocket_BagUpdated_ConnectSecondWebsock
 
 	wg.Wait()
 
-	for _, s := range servers {
-		go func(server *test.Server) {
-			removed, err := server.VerifyChannelRemoved(pool, "testbag", &test.Config{})
+	c0.Close()
+	c1.Close()
+
+	returnChan := make(chan error)
+	go func() {
+		for _, s := range servers {
+			removed, err := s.VerifyChannelRemoved(pool, "testbag", &test.Config{})
 			if err != nil {
-				t.Fatal(err)
+				returnChan <- err
 				return
 			}
 			if !removed {
-				t.Errorf("channel was not removed")
+				returnChan <- fmt.Errorf("channel was not removed")
 				return
 			}
-		}(s)
+			returnChan <- nil
+		}
+		close(returnChan)
+	}()
+
+	for returnErr := range returnChan {
+		if returnErr != nil {
+			t.Fatal(returnErr)
+		}
 	}
 
 	destroyServers()
@@ -858,12 +894,7 @@ func Test_MultiServer_MultipleBagExists_ConnectMultiWebSockets_BagsUpdated_WebSo
 		return
 	}
 
-	var wgs sync.WaitGroup
-	wgs.Add(len(servers))
-
-	readAndCloseWebsocket := func(c *websocket.Conn, config *test.Config) {
-		defer wgs.Done()
-
+	readAndCloseWebsocket := func(c *websocket.Conn, config *test.Config, returnChan chan error) {
 		var wg sync.WaitGroup
 		wg.Add(1)
 
@@ -871,18 +902,28 @@ func Test_MultiServer_MultipleBagExists_ConnectMultiWebSockets_BagsUpdated_WebSo
 
 		wg.Wait()
 
-		err = c.Close()
-		if err != nil {
-			t.Fatal(err)
+		closeErr := c.Close()
+		if closeErr != nil {
+			returnChan <- closeErr
 			return
+		}
+		returnChan <- nil
+	}
+
+	returnChan := make(chan error)
+	go func() {
+		readAndCloseWebsocket(conn0, config0, returnChan)
+		readAndCloseWebsocket(conn1, config1, returnChan)
+		close(returnChan)
+	}()
+
+	for returnErr := range returnChan {
+		if returnErr != nil {
+			t.Fatal(returnErr)
 		}
 	}
 
-	go readAndCloseWebsocket(conn0, config0)
-	go readAndCloseWebsocket(conn1, config1)
-
-	wgs.Wait()
-
+	var wgs sync.WaitGroup
 	wgs.Add(len(servers))
 
 	cleanUp := func(server *test.Server, bag string, config *test.Config) {
