@@ -1,6 +1,8 @@
 package broadcast
 
-import "github.com/gorilla/websocket"
+import (
+	"github.com/gorilla/websocket"
+)
 
 // Message channel -> data
 type Message struct {
@@ -11,14 +13,11 @@ type Message struct {
 
 // Connection channel -> web socket connection
 type Connection struct {
-	Channel   string
-	Websocket *websocket.Conn
-}
-
-// WebSocketMsg webSocketMsg
-type WebSocketMsg struct {
-	Data []byte
-	Conn *websocket.Conn
+	Id            string
+	Data          []byte
+	Channel       string
+	Websocket     *websocket.Conn
+	WebSocketSent chan error
 }
 
 // Receiver receiver
@@ -27,9 +26,7 @@ type Receiver interface {
 	Run(channel string)
 	Broadcast(msg *Message)
 	Register(connection *Connection)
-
-	Message(webSocketMsg *WebSocketMsg)
-	WsChan() chan error
+	Message(connection *Connection)
 }
 
 // Writer writer

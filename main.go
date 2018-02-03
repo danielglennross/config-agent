@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"github.com/danielglennross/config-agent/logger"
 	"github.com/danielglennross/config-agent/routing"
 	"github.com/danielglennross/config-agent/store"
+	"github.com/twinj/uuid"
 )
 
 /*
@@ -29,6 +31,8 @@ var (
 )
 
 func main() {
+	uuid.Init()
+
 	close := &err.Close{
 		Mu:   &sync.Mutex{},
 		Exit: &[]chan bool{},
@@ -92,6 +96,8 @@ func handleSignal(close *err.Close) {
 	log.Info("Received signal, stopping gracefully", logger.Fields{
 		"signal": sig,
 	})
+
+	fmt.Printf("no. of exits: %d\n", len(*close.Exit))
 
 	for _, exit := range *close.Exit {
 		exit <- true

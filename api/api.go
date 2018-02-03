@@ -10,6 +10,7 @@ import (
 	"github.com/danielglennross/config-agent/store"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	"github.com/twinj/uuid"
 )
 
 var (
@@ -99,8 +100,6 @@ func HandleWebsocket(store store.BagStore, br broadcast.Receiver) func(w http.Re
 
 		go br.Run(bag)
 
-		br.Register(&broadcast.Connection{Websocket: ws, Channel: bag})
-
 		//return the in memory collection
 		data, err := store.Get(bag)
 		if err != nil {
@@ -108,8 +107,18 @@ func HandleWebsocket(store store.BagStore, br broadcast.Receiver) func(w http.Re
 			return
 		}
 
-		br.Message(&broadcast.WebSocketMsg{Conn: ws, Data: data})
-		<-br.WsChan()
+		connection := &broadcast.Connection{
+			Websocket:     ws,
+			Channel:       bag,
+			Id:            uuid.NewV4().String(),
+			Data:          data,
+			WebSocketSent: make(chan error),
+		}
+
+		br.Register(connection)
+
+		br.Message(connection)
+		<-connection.WebSocketSent
 
 		//ws.WriteMessage(websocket.TextMessage, data)
 	}

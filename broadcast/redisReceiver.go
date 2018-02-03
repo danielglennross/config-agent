@@ -27,8 +27,7 @@ type RedisReceiver struct {
 	messages       chan *Message
 	newConnections chan *Connection
 
-	sockets chan *WebSocketMsg
-	wsChan  chan error
+	mapp *sync.Map
 }
 
 // NewRedisReceiver creates a redisReceiver that will use the provided
@@ -45,14 +44,9 @@ func NewRedisReceiver(pool *redis.Pool, close *err.Close) Receiver {
 		close:          close,
 		messages:       make(chan *Message, 1000), // 1000 is arbitrary
 		newConnections: make(chan *Connection),
-		sockets:        make(chan *WebSocketMsg),
-		wsChan:         make(chan error),
-	}
-}
 
-// WsChan websocket message channel
-func (rr *RedisReceiver) WsChan() chan error {
-	return rr.wsChan
+		mapp: &sync.Map{},
+	}
 }
 
 // Init init pubsub
@@ -172,8 +166,26 @@ func (rr *RedisReceiver) listener(channel string) {
 }
 
 // Message sync web socket sending
-func (rr *RedisReceiver) Message(webSocketMsg *WebSocketMsg) {
-	rr.sockets <- webSocketMsg
+func (rr *RedisReceiver) Message(connection *Connection) {
+	exit := make(chan bool)
+	rr.close.Mu.Lock()
+	*rr.close.Exit = append(*rr.close.Exit, exit)
+	rr.close.Mu.Unlock()
+
+	webSocketChan := make(chan *Connection)
+	rr.mapp.Store(connection.Id, webSocketChan)
+	go func() {
+		for {
+			select {
+			case <-exit:
+				fmt.Println("disposed websocket messenger")
+				return
+			case conn := <-webSocketChan:
+				conn.WebSocketSent <- conn.Websocket.WriteMessage(websocket.TextMessage, conn.Data)
+			}
+		}
+	}()
+	webSocketChan <- connection
 }
 
 // Register the websocket connection with the receiver.
@@ -184,17 +196,10 @@ func (rr *RedisReceiver) Register(connection *Connection) {
 func (rr *RedisReceiver) broadcaster() {
 	defer rr.close.Wg.Done()
 
-	exitWsMsger := make(chan bool)
-	rr.close.Mu.Lock()
-	*rr.close.Exit = append(*rr.close.Exit, exitWsMsger)
-	rr.close.Mu.Unlock()
-
 	exitBroadcaster := make(chan bool)
 	rr.close.Mu.Lock()
 	*rr.close.Exit = append(*rr.close.Exit, exitBroadcaster)
 	rr.close.Mu.Unlock()
-
-	//wsChan := make(chan error)
 
 	connMu := &sync.Mutex{}
 	conns := make([]*Connection, 0)
@@ -217,12 +222,22 @@ func (rr *RedisReceiver) broadcaster() {
 
 			conn := conns[i]
 			if conn.Channel == msg.Channel {
-				rr.Message(&WebSocketMsg{Conn: conn.Websocket, Data: msg.Data})
-				if err := <-rr.wsChan; err != nil {
-					//if err := conn.Websocket.WriteMessage(websocket.TextMessage, msg.Data); err != nil {
-					mutateConns(conn, removeConn)
-					iter(i)
-					return
+				result, ok := rr.mapp.Load(conn.Id)
+				if ok {
+					chanConnection := result.(chan *Connection)
+					chanConnection <- &Connection{ // copy connection w/ new data from redis
+						Id:            conn.Id,
+						Data:          msg.Data,
+						Channel:       conn.Channel,
+						Websocket:     conn.Websocket,
+						WebSocketSent: conn.WebSocketSent,
+					}
+					if err := <-conn.WebSocketSent; err != nil {
+						mutateConns(conn, removeConn)
+						rr.mapp.Delete(conn.Id)
+						iter(i)
+						return
+					}
 				}
 			}
 			i++
@@ -266,34 +281,24 @@ func (rr *RedisReceiver) broadcaster() {
 		defer connMu.Unlock()
 
 		if len(conns) > 0 {
-			err := make(chan error)
+			deleteReq := make(chan deleteWs)
 
 			go func() {
 				for _, c := range conns {
-					err <- c.Websocket.Close()
+					deleteReq <- deleteWs{id: c.Id, err: c.Websocket.Close()}
 				}
-				close(err)
+				close(deleteReq)
 			}()
 
-			for e := range err {
-				if e != nil {
-					fmt.Printf("\n closing web socket error: %t", e == nil)
+			for dr := range deleteReq {
+				if dr.err != nil {
+					fmt.Printf("\n closing web socket error: %s", dr.err)
+				} else {
+					rr.mapp.Delete(dr.id)
 				}
 			}
 		}
 	}
-
-	go func() {
-		for {
-			select {
-			case <-exitWsMsger:
-				fmt.Println("disposed ws messager")
-				return
-			case wsm := <-rr.sockets:
-				rr.wsChan <- wsm.Conn.WriteMessage(websocket.TextMessage, wsm.Data)
-			}
-		}
-	}()
 
 	for {
 		select {
@@ -309,6 +314,11 @@ func (rr *RedisReceiver) broadcaster() {
 			go mutateConns(conn, appendConn)
 		}
 	}
+}
+
+type deleteWs struct {
+	id  string
+	err error
 }
 
 func appendConn(conns []*Connection, add *Connection) []*Connection {
