@@ -7,7 +7,6 @@ import (
 
 	"github.com/danielglennross/config-agent/err"
 	"github.com/garyburd/redigo/redis"
-	"github.com/gorilla/websocket"
 )
 
 type mutateConnection func(conns []*Connection, add *Connection) []*Connection
@@ -24,15 +23,13 @@ type RedisReceiver struct {
 	close               *err.Close
 	establishedChannels []string
 
-	messages       chan *Message
-	newConnections chan *Connection
-
-	mapp *sync.Map
+	messages chan *Message
+	wsm      Messanger
 }
 
 // NewRedisReceiver creates a redisReceiver that will use the provided
 // redis.Pool.
-func NewRedisReceiver(pool *redis.Pool, close *err.Close) Receiver {
+func NewRedisReceiver(pool *redis.Pool, close *err.Close, wsm Messanger) Receiver {
 	return &RedisReceiver{
 		mu:       &sync.Mutex{},
 		pubSubMu: &sync.Mutex{},
@@ -40,12 +37,10 @@ func NewRedisReceiver(pool *redis.Pool, close *err.Close) Receiver {
 			conn := pool.Get()
 			return &redis.PubSubConn{Conn: conn}
 		},
-		pubSubConn:     nil,
-		close:          close,
-		messages:       make(chan *Message, 1000), // 1000 is arbitrary
-		newConnections: make(chan *Connection),
-
-		mapp: &sync.Map{},
+		pubSubConn: nil,
+		close:      close,
+		messages:   make(chan *Message, 1000), // 1000 is arbitrary
+		wsm:        wsm,
 	}
 }
 
@@ -165,32 +160,9 @@ func (rr *RedisReceiver) listener(channel string) {
 	}
 }
 
-// Message sync web socket sending
-func (rr *RedisReceiver) Message(connection *Connection) {
-	exit := make(chan bool)
-	rr.close.Mu.Lock()
-	*rr.close.Exit = append(*rr.close.Exit, exit)
-	rr.close.Mu.Unlock()
-
-	webSocketChan := make(chan *Connection)
-	rr.mapp.Store(connection.Id, webSocketChan)
-	go func() {
-		for {
-			select {
-			case <-exit:
-				fmt.Println("disposed websocket messenger")
-				return
-			case conn := <-webSocketChan:
-				conn.WebSocketSent <- conn.Websocket.WriteMessage(websocket.TextMessage, conn.Data)
-			}
-		}
-	}()
-	webSocketChan <- connection
-}
-
 // Register the websocket connection with the receiver.
 func (rr *RedisReceiver) Register(connection *Connection) {
-	rr.newConnections <- connection
+	rr.wsm.Register(connection)
 }
 
 func (rr *RedisReceiver) broadcaster() {
@@ -201,64 +173,11 @@ func (rr *RedisReceiver) broadcaster() {
 	*rr.close.Exit = append(*rr.close.Exit, exitBroadcaster)
 	rr.close.Mu.Unlock()
 
-	connMu := &sync.Mutex{}
-	conns := make([]*Connection, 0)
-
-	mutateConns := func(conn *Connection, fn mutateConnection) {
-		connMu.Lock()
-		defer connMu.Unlock()
-		conns = fn(conns, conn)
-	}
-
-	send := func(msg *Message) {
-		var iter func(i int)
-		iter = func(i int) {
-			connMu.Lock()
-			if i > len(conns)-1 {
-				connMu.Unlock()
-				return
-			}
-			connMu.Unlock()
-
-			conn := conns[i]
-			if conn.Channel == msg.Channel {
-				result, ok := rr.mapp.Load(conn.Id)
-				if ok {
-					chanConnection := result.(chan *Connection)
-					chanConnection <- &Connection{ // copy connection w/ new data from redis
-						Id:            conn.Id,
-						Data:          msg.Data,
-						Channel:       conn.Channel,
-						Websocket:     conn.Websocket,
-						WebSocketSent: conn.WebSocketSent,
-					}
-					if err := <-conn.WebSocketSent; err != nil {
-						mutateConns(conn, removeConn)
-						rr.mapp.Delete(conn.Id)
-						iter(i)
-						return
-					}
-				}
-			}
-			i++
-			iter(i)
-		}
-		iter(0)
-	}
-
 	checkChannel := func(msg *Message) {
 		rr.mu.Lock()
 		defer rr.mu.Unlock()
 
-		connMu.Lock()
-		defer connMu.Unlock()
-
-		found := false
-		for _, conn := range conns {
-			if conn.Channel == msg.Channel {
-				found = true
-			}
-		}
+		found := rr.wsm.ConnectionExists(msg.Channel)
 
 		if !found {
 			var i int
@@ -276,72 +195,16 @@ func (rr *RedisReceiver) broadcaster() {
 		}
 	}
 
-	dispose := func() {
-		connMu.Lock()
-		defer connMu.Unlock()
-
-		if len(conns) > 0 {
-			deleteReq := make(chan deleteWs)
-
-			go func() {
-				for _, c := range conns {
-					deleteReq <- deleteWs{id: c.Id, err: c.Websocket.Close()}
-				}
-				close(deleteReq)
-			}()
-
-			for dr := range deleteReq {
-				if dr.err != nil {
-					fmt.Printf("\n closing web socket error: %s", dr.err)
-				} else {
-					rr.mapp.Delete(dr.id)
-				}
-			}
-		}
-	}
-
 	for {
 		select {
 		case <-exitBroadcaster:
 			fmt.Println("disposing broadcaster")
-			dispose()
+			rr.wsm.Dispose()
 			fmt.Println("disposed broadcaster")
 			return
 		case msg := <-rr.messages:
-			send(msg)
+			rr.wsm.Send(msg)
 			go checkChannel(msg)
-		case conn := <-rr.newConnections:
-			go mutateConns(conn, appendConn)
 		}
 	}
-}
-
-type deleteWs struct {
-	id  string
-	err error
-}
-
-func appendConn(conns []*Connection, add *Connection) []*Connection {
-	conns = append(conns, add)
-	return conns
-}
-
-func removeConn(conns []*Connection, remove *Connection) []*Connection {
-	var i int
-	var found bool
-	for i = 0; i < len(conns); i++ {
-		if conns[i] == remove {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		// log
-		return conns
-	}
-
-	copy(conns[i:], conns[i+1:]) // shift down
-	conns[len(conns)-1] = nil    // nil last element
-	return conns[:len(conns)-1]  // truncate slice
 }

@@ -110,16 +110,12 @@ func HandleWebsocket(store store.BagStore, br broadcast.Receiver) func(w http.Re
 		connection := &broadcast.Connection{
 			Websocket:     ws,
 			Channel:       bag,
-			Id:            uuid.NewV4().String(),
+			ID:            uuid.NewV4().String(),
 			Data:          data,
 			WebSocketSent: make(chan error),
 		}
 
 		br.Register(connection)
-
-		br.Message(connection)
 		<-connection.WebSocketSent
-
-		//ws.WriteMessage(websocket.TextMessage, data)
 	}
 }

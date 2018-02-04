@@ -45,7 +45,8 @@ func CreateServer(redisPool *redigo.Pool, setupStore func(store store.BagStore) 
 		return nil, nil, err
 	}
 
-	br := broadcast.NewRedisReceiver(redisPool, close)
+	ws := broadcast.NewWebSocketManager(close)
+	br := broadcast.NewRedisReceiver(redisPool, close, ws)
 	bw := broadcast.NewRedisWriter(redisPool, close)
 
 	br.Init()

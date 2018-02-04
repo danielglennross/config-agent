@@ -46,7 +46,8 @@ func main() {
 	}
 
 	st := store.NewRedisBagStore(redisPool)
-	br := broadcast.NewRedisReceiver(redisPool, close)
+	ws := broadcast.NewWebSocketManager(close)
+	br := broadcast.NewRedisReceiver(redisPool, close, ws)
 	bw := broadcast.NewRedisWriter(redisPool, close)
 
 	br.Init()

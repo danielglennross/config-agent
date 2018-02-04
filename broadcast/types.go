@@ -13,11 +13,19 @@ type Message struct {
 
 // Connection channel -> web socket connection
 type Connection struct {
-	Id            string
+	ID            string
 	Data          []byte
 	Channel       string
 	Websocket     *websocket.Conn
 	WebSocketSent chan error
+}
+
+// Messanger messanger
+type Messanger interface {
+	Send(msg *Message)
+	ConnectionExists(channel string) bool
+	Register(connection *Connection)
+	Dispose()
 }
 
 // Receiver receiver
@@ -26,7 +34,6 @@ type Receiver interface {
 	Run(channel string)
 	Broadcast(msg *Message)
 	Register(connection *Connection)
-	Message(connection *Connection)
 }
 
 // Writer writer
