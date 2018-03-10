@@ -32,6 +32,7 @@ var (
 
 func main() {
 	uuid.Init()
+	logger.Init(logger.InfoLevel)
 
 	close := &err.Close{
 		Mu:   &sync.Mutex{},
@@ -64,8 +65,7 @@ func main() {
 		}
 	}()
 
-	r := routing.NewRouter(st, br, bw)
-	http.Handle("/", r)
+	http.Handle("/", routing.NewRouter(st, br, bw))
 
 	close.Wg.Add(1)
 	go handleSignal(close)
