@@ -1,11 +1,11 @@
 package broadcast
 
 import (
-	"fmt"
 	"sync"
 	"time"
 
 	"github.com/danielglennross/config-agent/err"
+	"github.com/danielglennross/config-agent/logger"
 	"github.com/garyburd/redigo/redis"
 )
 
@@ -23,13 +23,15 @@ type RedisReceiver struct {
 	close               *err.Close
 	establishedChannels []string
 
-	messages chan *Message
-	wsm      Messanger
+	messages chan *TrackedMessage
+	wsm      Messenger
+
+	log *logger.Logger
 }
 
 // NewRedisReceiver creates a redisReceiver that will use the provided
 // redis.Pool.
-func NewRedisReceiver(pool *redis.Pool, close *err.Close, wsm Messanger) Receiver {
+func NewRedisReceiver(pool *redis.Pool, close *err.Close, wsm Messenger, log *logger.Logger) Receiver {
 	return &RedisReceiver{
 		mu:       &sync.Mutex{},
 		pubSubMu: &sync.Mutex{},
@@ -39,8 +41,9 @@ func NewRedisReceiver(pool *redis.Pool, close *err.Close, wsm Messanger) Receive
 		},
 		pubSubConn: nil,
 		close:      close,
-		messages:   make(chan *Message, 1000), // 1000 is arbitrary
+		messages:   make(chan *TrackedMessage, 1000), // 1000 is arbitrary
 		wsm:        wsm,
+		log:        log,
 	}
 }
 
@@ -84,7 +87,7 @@ func (rr *RedisReceiver) Run(channel string) {
 // Broadcast the provided message to all connected websocket connections.
 // If an error occurs while writting a message to a websocket connection it is
 // closed and deregistered.
-func (rr *RedisReceiver) Broadcast(msg *Message) {
+func (rr *RedisReceiver) Broadcast(msg *TrackedMessage) {
 	rr.messages <- msg
 }
 
@@ -109,9 +112,9 @@ func (rr *RedisReceiver) listener(channel string) {
 		}()
 		select {
 		case <-timeout:
-			fmt.Println("waiting on close pub sub timeout")
+			rr.log.ErrorMsg("waiting on close pub sub timeout")
 		case <-closeResult:
-			fmt.Println("waiting on close pub sub success")
+			rr.log.InfoMsg("waiting on close pub sub success")
 		}
 
 		// remove channel from in memory list
@@ -142,18 +145,24 @@ func (rr *RedisReceiver) listener(channel string) {
 		}()
 		select {
 		case <-exit:
-			fmt.Println("disposing listener")
+			rr.log.InfoMsg("disposing listener")
 			dispose()
-			fmt.Println("disposed listener")
+			rr.log.InfoMsg("disposed listener")
 			return
 		case v := <-receiver:
 			switch v.(type) {
 			case redis.Message:
-				rr.Broadcast(&Message{Channel: channel, Data: v.(redis.Message).Data})
+				msg, err := GetReceiverMessage(v.(redis.Message).Data, channel)
+				if err != nil {
+					rr.log.Error("Failed to read redis message", err)
+					continue
+				}
+
+				rr.Broadcast(msg)
 			case redis.Subscription:
 				continue
 			case error:
-				fmt.Printf("Error while subscribed to Redis channel %s", v.(error))
+				rr.log.Error("Error while subscribed to Redis channel", v.(error))
 			default:
 			}
 		}
@@ -173,7 +182,7 @@ func (rr *RedisReceiver) broadcaster() {
 	*rr.close.Exit = append(*rr.close.Exit, exitBroadcaster)
 	rr.close.Mu.Unlock()
 
-	checkChannel := func(msg *Message) {
+	checkChannel := func(msg *TrackedMessage) {
 		rr.mu.Lock()
 		defer rr.mu.Unlock()
 
@@ -198,9 +207,9 @@ func (rr *RedisReceiver) broadcaster() {
 	for {
 		select {
 		case <-exitBroadcaster:
-			fmt.Println("disposing broadcaster")
+			rr.log.InfoMsg("disposing broadcaster")
 			rr.wsm.Dispose()
-			fmt.Println("disposed broadcaster")
+			rr.log.InfoMsg("disposed broadcaster")
 			return
 		case msg := <-rr.messages:
 			rr.wsm.Send(msg)

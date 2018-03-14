@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/danielglennross/config-agent/broadcast"
+	"github.com/danielglennross/config-agent/logger"
 	"github.com/danielglennross/config-agent/store"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -31,9 +32,6 @@ type ErrResponse struct {
 	Detail string
 }
 
-// ContextKey context key
-type ContextKey string
-
 func setErrResponse(httpCode int) func(w http.ResponseWriter, err *ErrResponse) {
 	return func(w http.ResponseWriter, err *ErrResponse) {
 		body, _ := json.Marshal(err)
@@ -47,8 +45,6 @@ func setErrResponse(httpCode int) func(w http.ResponseWriter, err *ErrResponse) 
 // UpdateBagHandler handler to update bags
 func UpdateBagHandler(store store.BagStore, writer broadcast.Writer) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		//correlationToken := r.Context().Value(ContextKey("CorrelationToken")).(string)
-
 		vars := mux.Vars(r)
 		bag := vars["bag"]
 
@@ -70,8 +66,19 @@ func UpdateBagHandler(store store.BagStore, writer broadcast.Writer) func(w http
 			return
 		}
 
+		correlationToken := r.Context().Value(logger.ContextKey("CorrelationToken")).(string)
+
 		// publish to redis
-		writer.Publish(&broadcast.Message{Channel: bag, Data: body, DeliveryAttempt: 0})
+		writer.Publish(&broadcast.DeliverableTrackedMessage{
+			DeliveryAttempt: 0,
+			TrackedMessage: broadcast.TrackedMessage{
+				CorrelationToken: correlationToken,
+				Message: broadcast.Message{
+					Channel: bag,
+					Data:    body,
+				},
+			},
+		})
 
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -80,8 +87,6 @@ func UpdateBagHandler(store store.BagStore, writer broadcast.Writer) func(w http
 // HandleWebsocket applies web scoket connection
 func HandleWebsocket(store store.BagStore, br broadcast.Receiver) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		//correlationToken := r.Context().Value(ContextKey("CorrelationToken")).(string)
-
 		vars := mux.Vars(r)
 		bag := vars["bag"]
 		if bag == "" {

@@ -1,10 +1,10 @@
 package broadcast
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/danielglennross/config-agent/err"
+	"github.com/danielglennross/config-agent/logger"
 	"github.com/gorilla/websocket"
 )
 
@@ -14,6 +14,7 @@ type WebSocketManager struct {
 	conns  []*Connection
 	close  *err.Close
 	mapp   *sync.Map
+	log    *logger.Logger
 }
 
 type deleteWs struct {
@@ -22,12 +23,13 @@ type deleteWs struct {
 }
 
 // NewWebSocketManager ctor
-func NewWebSocketManager(close *err.Close) *WebSocketManager {
+func NewWebSocketManager(close *err.Close, log *logger.Logger) *WebSocketManager {
 	return &WebSocketManager{
 		connMu: &sync.Mutex{},
 		conns:  make([]*Connection, 0),
 		close:  close,
 		mapp:   &sync.Map{},
+		log:    log,
 	}
 }
 
@@ -46,7 +48,7 @@ func (wsm *WebSocketManager) Register(connection *Connection) {
 		for {
 			select {
 			case <-exit:
-				fmt.Println("disposed websocket messenger")
+				wsm.log.InfoMsg("disposed websocket messenger")
 				return
 			case conn := <-webSocketChan:
 				conn.WebSocketSent <- conn.Websocket.WriteMessage(websocket.TextMessage, conn.Data)
@@ -57,7 +59,7 @@ func (wsm *WebSocketManager) Register(connection *Connection) {
 }
 
 // Send message
-func (wsm *WebSocketManager) Send(msg *Message) {
+func (wsm *WebSocketManager) Send(msg *TrackedMessage) {
 	var iter func(i int)
 	iter = func(i int) {
 		wsm.connMu.Lock()
@@ -124,7 +126,7 @@ func (wsm *WebSocketManager) Dispose() {
 
 		for dr := range deleteReq {
 			if dr.err != nil {
-				fmt.Printf("\n closing web socket error: %s", dr.err)
+				wsm.log.Error("closing web socket error", dr.err)
 			} else {
 				wsm.mapp.Delete(dr.id)
 			}

@@ -24,15 +24,15 @@ update bag:
 curl -X PUT -d "{\"key1\":\"value\"}" -H "X-Correlation-Token: test" http://localhost:8080/config/testbag
 */
 
-var (
-	log = logger.NewLogger(logger.Fields{
-		"file": "main",
-	})
-)
+func init() {
+	uuid.Init()
+}
 
 func main() {
-	uuid.Init()
-	logger.Init(logger.InfoLevel)
+	log := logger.NewLogger(logger.Fields{
+		"app": "config-agent",
+	})
+	log.SetLevel(logger.InfoLevel)
 
 	close := &err.Close{
 		Mu:   &sync.Mutex{},
@@ -47,9 +47,9 @@ func main() {
 	}
 
 	st := store.NewRedisBagStore(redisPool)
-	ws := broadcast.NewWebSocketManager(close)
-	br := broadcast.NewRedisReceiver(redisPool, close, ws)
-	bw := broadcast.NewRedisWriter(redisPool, close)
+	ws := broadcast.NewWebSocketManager(close, log)
+	br := broadcast.NewRedisReceiver(redisPool, close, ws, log)
+	bw := broadcast.NewRedisWriter(redisPool, close, log)
 
 	br.Init()
 	bw.Init()
@@ -65,10 +65,10 @@ func main() {
 		}
 	}()
 
-	http.Handle("/", routing.NewRouter(st, br, bw))
+	http.Handle("/", routing.NewRouter(st, br, bw, log))
 
 	close.Wg.Add(1)
-	go handleSignal(close)
+	go handleSignal(close, log)
 
 	log.Info("Server running", logger.Fields{
 		"add": srv.Addr,
@@ -82,7 +82,7 @@ func main() {
 	log.InfoMsg("App killed")
 }
 
-func handleSignal(close *err.Close) {
+func handleSignal(close *err.Close, log *logger.Logger) {
 	defer close.Wg.Done()
 
 	c := make(chan os.Signal, 1)

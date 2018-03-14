@@ -5,16 +5,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/danielglennross/config-agent/logger"
 	"github.com/danielglennross/config-agent/store"
 	"github.com/danielglennross/config-agent/test"
 	redigo "github.com/garyburd/redigo/redis"
 	"github.com/gorilla/websocket"
 )
-
-func init() {
-	logger.Init(logger.ErrorLevel)
-}
 
 func createServerAndRedisPool(bag string) (server *test.Server, destroyServer func() error, pool *redigo.Pool, err error) {
 	pool, err = test.CreateRedisPool(func(c redigo.Conn) (err error) {

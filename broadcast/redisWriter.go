@@ -1,10 +1,10 @@
 package broadcast
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/danielglennross/config-agent/err"
+	"github.com/danielglennross/config-agent/logger"
 	"github.com/garyburd/redigo/redis"
 	"github.com/pkg/errors"
 )
@@ -15,18 +15,20 @@ type RedisWriter struct {
 	conn        redis.Conn
 	close       *err.Close
 
-	messages chan *Message
+	messages chan *DeliverableTrackedMessage
+	log      *logger.Logger
 }
 
 // NewRedisWriter ctor
-func NewRedisWriter(pool *redis.Pool, close *err.Close) Writer {
+func NewRedisWriter(pool *redis.Pool, close *err.Close, log *logger.Logger) Writer {
 	return &RedisWriter{
 		connFactory: func() redis.Conn {
 			return pool.Get()
 		},
 		conn:     nil,
 		close:    close,
-		messages: make(chan *Message, 10000),
+		messages: make(chan *DeliverableTrackedMessage, 10000),
+		log:      log,
 	}
 }
 
@@ -36,7 +38,7 @@ func (rw *RedisWriter) Init() {
 }
 
 // Publish to Redis via channel.
-func (rw *RedisWriter) Publish(message *Message) {
+func (rw *RedisWriter) Publish(message *DeliverableTrackedMessage) {
 	rw.messages <- message
 }
 
@@ -50,8 +52,13 @@ func (rw *RedisWriter) Run() {
 	*rw.close.Exit = append(*rw.close.Exit, exit)
 	rw.close.Mu.Unlock()
 
-	writeToRedis := func(msg *Message) error {
-		if err := rw.conn.Send("PUBLISH", msg.Channel, msg.Data); err != nil {
+	writeToRedis := func(msg *DeliverableTrackedMessage) error {
+		data, err := PackWriterMessage(msg)
+		if err != nil {
+			return errors.Wrap(err, "Unable to serialize message for Redis")
+		}
+
+		if err := rw.conn.Send("PUBLISH", msg.Channel, data); err != nil {
 			return errors.Wrap(err, "Unable to publish message to Redis")
 		}
 
@@ -62,7 +69,7 @@ func (rw *RedisWriter) Run() {
 		return nil
 	}
 
-	reDeliver := func(msg *Message) {
+	reDeliver := func(msg *DeliverableTrackedMessage) {
 		time.Sleep(time.Millisecond * 300)
 		msg.DeliveryAttempt++
 		rw.Publish(msg)
@@ -75,9 +82,9 @@ func (rw *RedisWriter) Run() {
 	for {
 		select {
 		case <-exit:
-			fmt.Println("disposing writer")
+			rw.log.InfoMsg("disposing writer")
 			dispose()
-			fmt.Println("disposed writer")
+			rw.log.InfoMsg("disposed writer")
 			return
 		case msg := <-rw.messages:
 			if err := writeToRedis(msg); err != nil && msg.DeliveryAttempt < 3 {

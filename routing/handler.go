@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 
@@ -13,12 +14,6 @@ import (
 	"github.com/danielglennross/config-agent/store"
 	"github.com/gorilla/mux"
 	"github.com/twinj/uuid"
-)
-
-var (
-	log = logger.NewLogger(logger.Fields{
-		"file": "handler",
-	})
 )
 
 type recordingResponseWriter struct {
@@ -49,29 +44,25 @@ func (rrw *recordingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error
 	return nil, nil, errors.New("I'm not a Hijacker")
 }
 
-func logReq(next http.Handler) http.Handler {
+func logReq(next http.Handler, log *logger.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		correlationToken := r.Context().Value(api.ContextKey("CorrelationToken")).(string)
-		reqLog := logger.NewRequestLogger(
-			logger.SetCorrelationToken(correlationToken),
-			logger.SetRequestInfo(r.Method, r.RequestURI),
-		)
+		contextLog := log.NewContext(r.Context())
 
-		reqLog.InfoMsg("Entering request")
+		contextLog.InfoMsg("Entering request")
 
 		recordingW := newRecordingResponseWriter(w)
 
 		next.ServeHTTP(recordingW, r)
 
 		if recordingW.statusCode > 399 {
-			reqLog.ErrorFields("Exiting request", logger.Fields{
+			contextLog.ErrorFields("Exiting request", logger.Fields{
 				"StatusCode": recordingW.statusCode,
 				"Payload":    recordingW.payload,
 			})
 			return
 		}
 
-		reqLog.Info("Exiting request", logger.Fields{
+		contextLog.Info("Exiting request", logger.Fields{
 			"StatusCode": recordingW.statusCode,
 			"Payload":    recordingW.payload,
 		})
@@ -85,20 +76,23 @@ func setContext(next http.Handler) http.Handler {
 			correlationToken = uuid.NewV4().String()
 		}
 
-		ctx := context.WithValue(r.Context(), api.ContextKey("CorrelationToken"), correlationToken)
+		var ctx = r.Context()
+		ctx = context.WithValue(ctx, logger.ContextKey("CorrelationToken"), correlationToken)
+		ctx = context.WithValue(ctx, logger.ContextKey("Request"), fmt.Sprintf("[%s] %s", r.Method, r.RequestURI))
+
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 // NewRouter ctor
-func NewRouter(store store.BagStore, br broadcast.Receiver, bw broadcast.Writer) http.Handler {
+func NewRouter(store store.BagStore, br broadcast.Receiver, bw broadcast.Writer, log *logger.Logger) http.Handler {
 	r := mux.NewRouter()
 
 	r.HandleFunc("/config/{bag}", api.HandleWebsocket(store, br)).Methods("GET")
 	r.HandleFunc("/config/{bag}", api.UpdateBagHandler(store, bw)).Methods("PUT")
 
 	// middleware
-	composedHandlers := setContext(logReq(r))
+	composedHandlers := setContext(logReq(r, log))
 
 	return composedHandlers
 }

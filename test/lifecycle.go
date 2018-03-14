@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/danielglennross/config-agent/broadcast"
+	"github.com/danielglennross/config-agent/logger"
 
 	"github.com/danielglennross/config-agent/err"
 	"github.com/danielglennross/config-agent/routing"
@@ -33,6 +34,11 @@ func CreateRedisPool(setupPool func(c redigo.Conn) error) (*redigo.Pool, error) 
 
 // CreateServer create a test server
 func CreateServer(redisPool *redigo.Pool, setupStore func(store store.BagStore) error) (*Server, func() error, error) {
+	log := logger.NewLogger(logger.Fields{
+		"app": "config-agent-test",
+	})
+	log.SetLevel(logger.InfoLevel)
+
 	close := &err.Close{
 		Mu:   &sync.Mutex{},
 		Exit: &[]chan bool{},
@@ -45,16 +51,16 @@ func CreateServer(redisPool *redigo.Pool, setupStore func(store store.BagStore) 
 		return nil, nil, err
 	}
 
-	ws := broadcast.NewWebSocketManager(close)
-	br := broadcast.NewRedisReceiver(redisPool, close, ws)
-	bw := broadcast.NewRedisWriter(redisPool, close)
+	ws := broadcast.NewWebSocketManager(close, log)
+	br := broadcast.NewRedisReceiver(redisPool, close, ws, log)
+	bw := broadcast.NewRedisWriter(redisPool, close, log)
 
 	br.Init()
 	bw.Init()
 
 	go bw.Run()
 
-	server := httptest.NewServer(routing.NewRouter(st, br, bw))
+	server := httptest.NewServer(routing.NewRouter(st, br, bw, log))
 	fmt.Println(server.URL)
 
 	var tearDowns []func()
